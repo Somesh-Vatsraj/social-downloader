@@ -1,122 +1,158 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 import yt_dlp
+import os
+import tempfile
+import shutil
 import re
-from urllib.parse import urlparse
+import json
+import uuid
+from pathlib import Path
+
 
 app = FastAPI(
-    title="Social Media Downloader API",
+    title="Vatsraj Tech YouTube Downloader API",
+    description="YouTube metadata, formats and download API using yt-dlp",
     version="1.0.0"
 )
 
-# Allow frontend requests
+
+# ============================================================
+# CORS
+# ============================================================
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-class URLRequest(BaseModel):
-    url: str
+# ============================================================
+# BASIC CONFIG
+# ============================================================
+
+DOWNLOAD_DIR = Path(tempfile.gettempdir()) / "yt_downloads"
+DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+
+# ============================================================
+# YOUTUBE / YT-DLP OPTIONS
+# ============================================================
+
+BASE_YDL_OPTIONS = {
+    "quiet": True,
+    "no_warnings": False,
+
+    # Don't download during information extraction
+    "skip_download": True,
+
+    # Single video only
+    "noplaylist": True,
+
+    # External JS runtime
+    "js_runtimes": {
+        "deno": {}
+    },
+
+    # Allow EJS scripts
+    "remote_components": {
+        "ejs": ["github"]
+    },
+
+    # Better compatibility
+    "extractor_args": {
+        "youtube": {
+            "player_client": ["mweb"]
+        }
+    },
+}
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+def clean_text(value):
+    if value is None:
+        return ""
+
+    return str(value).strip()
 
 
 def iso_duration(seconds):
     if not seconds:
         return None
 
-    seconds = int(seconds)
-
-    h = seconds // 3600
-    m = (seconds % 3600) // 60
-    s = seconds % 60
-
-    if h:
-        return f"PT{h}H{m}M{s}S"
-
-    if m:
-        return f"PT{m}M{s}S"
-
-    return f"PT{s}S"
-
-
-def clean_filename(value):
-    if not value:
-        return "media"
-
-    return re.sub(r'[\\/*?:"<>|]', "_", value)
-
-
-def get_quality(height):
-    if not height:
+    try:
+        seconds = int(seconds)
+    except Exception:
         return None
 
-    if height >= 2160:
-        return "2160p"
-    elif height >= 1440:
-        return "1440p"
-    elif height >= 1080:
-        return "1080p"
-    elif height >= 720:
-        return "720p"
-    elif height >= 480:
-        return "480p"
-    elif height >= 360:
-        return "360p"
-    else:
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    secs = seconds % 60
+
+    if hours:
+        return f"PT{hours}H{minutes}M{secs}S"
+
+    if minutes:
+        return f"PT{minutes}M{secs}S"
+
+    return f"PT{secs}S"
+
+
+def quality_from_format(fmt):
+    height = fmt.get("height")
+
+    if height:
         return f"{height}p"
 
+    abr = fmt.get("abr")
 
-def detect_platform(url):
-    host = urlparse(url).netloc.lower()
-
-    if "youtube.com" in host or "youtu.be" in host:
-        return "youtube"
-
-    if "instagram.com" in host:
-        return "instagram"
-
-    if "facebook.com" in host or "fb.watch" in host:
-        return "facebook"
-
-    if "tiktok.com" in host:
-        return "tiktok"
-
-    if "linkedin.com" in host:
-        return "linkedin"
-
-    if "x.com" in host or "twitter.com" in host:
-        return "x"
-
-    if "pinterest.com" in host:
-        return "pinterest"
+    if abr:
+        return f"{int(abr)}kbps"
 
     return "unknown"
 
 
-def extract_media(info):
-    media = []
+def get_container(fmt):
+    ext = fmt.get("ext")
 
-    formats = info.get("formats") or []
+    if ext:
+        return f"{fmt.get('vcodec') != 'none' and 'video/' or 'audio/'}{ext}"
 
-    # Remove duplicate formats
-    seen = set()
+    return None
 
-    for f in formats:
 
-        url = f.get("url")
+def safe_filename(name):
+    name = clean_text(name)
 
-        if not url:
+    if not name:
+        name = "youtube_video"
+
+    name = re.sub(r'[\\/*?:"<>|]', "", name)
+
+    return name[:180]
+
+
+def get_formats(info):
+    result = []
+
+    formats = info.get("formats", [])
+
+    for fmt in formats:
+        format_id = fmt.get("format_id")
+
+        if not format_id:
             continue
 
-        height = f.get("height")
-        width = f.get("width")
-
-        vcodec = f.get("vcodec")
-        acodec = f.get("acodec")
+        vcodec = fmt.get("vcodec")
+        acodec = fmt.get("acodec")
 
         has_video = vcodec not in (None, "none")
         has_audio = acodec not in (None, "none")
@@ -124,60 +160,83 @@ def extract_media(info):
         if not has_video and not has_audio:
             continue
 
-        if has_video:
-            media_type = "video"
-            container = f.get("ext")
+        width = fmt.get("width") or 0
+        height = fmt.get("height") or 0
 
-            if container:
-                container = f"video/{container}"
-
-            quality = get_quality(height)
-
-        else:
-            media_type = "audio"
-            container = f.get("ext")
-
-            if container:
-                container = f"audio/{container}"
-
-            quality = None
-
-        key = (
-            media_type,
-            height,
-            width,
-            f.get("format_id"),
-            f.get("abr")
+        filesize = (
+            fmt.get("filesize")
+            or fmt.get("filesize_approx")
+            or 0
         )
 
-        if key in seen:
-            continue
-
-        seen.add(key)
-
-        media.append({
-            "type": media_type,
-            "id": f"format_{f.get('format_id')}",
-            "url": url,
-            "width": width or 0,
-            "height": height or 0,
-            "container": container,
+        result.append({
+            "format_id": format_id,
+            "ext": fmt.get("ext"),
+            "width": width,
+            "height": height,
+            "resolution": (
+                f"{width}x{height}"
+                if width and height
+                else None
+            ),
+            "quality": quality_from_format(fmt),
+            "fps": fmt.get("fps"),
+            "filesize": filesize,
+            "filesize_mb": (
+                round(filesize / 1024 / 1024, 2)
+                if filesize
+                else None
+            ),
             "has_audio": has_audio,
             "has_video": has_video,
-            "has_photo": False,
-            "quality": quality,
-            "duration": iso_duration(
-                f.get("duration") or info.get("duration")
+            "vcodec": vcodec,
+            "acodec": acodec,
+            "container": get_container(fmt),
+            "audio_quality": fmt.get("abr"),
+            "url": fmt.get("url"),
+        })
+
+    return result
+
+
+def extract_info(url):
+    options = BASE_YDL_OPTIONS.copy()
+
+    with yt_dlp.YoutubeDL(options) as ydl:
+        return ydl.extract_info(url, download=False)
+
+
+def build_response(info):
+
+    thumbnail = info.get("thumbnail")
+
+    media = []
+
+    # Main video information
+    if info.get("url"):
+        media.append({
+            "type": "video",
+            "id": "main_video",
+            "url": info.get("url"),
+            "width": info.get("width") or 0,
+            "height": info.get("height") or 0,
+            "container": (
+                f"video/{info.get('ext')}"
+                if info.get("ext")
+                else None
             ),
-            "format_id": f.get("format_id"),
-            "filesize": f.get("filesize") or f.get("filesize_approx"),
-            "fps": f.get("fps"),
-            "bitrate": f.get("tbr")
+            "has_audio": True,
+            "has_video": True,
+            "has_photo": False,
+            "quality": (
+                f"{info.get('height')}p"
+                if info.get("height")
+                else "unknown"
+            ),
+            "duration": iso_duration(info.get("duration"))
         })
 
     # Thumbnail
-    thumbnail = info.get("thumbnail")
-
     if thumbnail:
         media.append({
             "type": "photo",
@@ -189,129 +248,162 @@ def extract_media(info):
             "has_audio": False,
             "has_video": False,
             "has_photo": True,
-            "quality": "HD Full",
-            "duration": None
+            "quality": "HD Full"
         })
 
-    return media
+    return {
+        "success": True,
+        "type": "video",
+        "platform": "youtube",
 
+        "id": info.get("id"),
+
+        "username": (
+            info.get("uploader_id")
+            or info.get("channel_id")
+            or info.get("uploader")
+        ),
+
+        "channel": info.get("channel"),
+
+        "profile_image_uri": None,
+
+        "title": info.get("title"),
+
+        "caption": (
+            info.get("description")
+            or info.get("title")
+            or ""
+        ),
+
+        "description": info.get("description"),
+
+        "thumbnail": thumbnail,
+
+        "duration": info.get("duration"),
+
+        "duration_iso": iso_duration(
+            info.get("duration")
+        ),
+
+        "upload_date": info.get("upload_date"),
+
+        "view_count": info.get("view_count"),
+
+        "like_count": info.get("like_count"),
+
+        "webpage_url": info.get("webpage_url"),
+
+        "media": media,
+
+        "formats": get_formats(info)
+    }
+
+
+# ============================================================
+# HOME
+# ============================================================
 
 @app.get("/")
 def home():
     return {
         "success": True,
-        "message": "Social Media Downloader API is running",
-        "docs": "/docs"
+        "name": "Vatsraj Tech YouTube Downloader API",
+        "version": "1.0.0",
+        "status": "online",
+
+        "endpoints": {
+            "extract": "/api/extract?url=YOUTUBE_URL",
+            "formats": "/api/formats?url=YOUTUBE_URL",
+            "download": "/api/download?url=YOUTUBE_URL",
+            "health": "/health",
+            "docs": "/docs"
+        }
     }
 
 
-@app.get("/api/platform")
-def platform(url: str):
+# ============================================================
+# HEALTH
+# ============================================================
 
-    if not url.startswith(("http://", "https://")):
-        raise HTTPException(
-            status_code=400,
-            detail="Valid URL required"
-        )
-
+@app.get("/health")
+def health():
     return {
         "success": True,
-        "platform": detect_platform(url),
-        "url": url
+        "status": "healthy"
     }
 
 
-@app.post("/api/extract")
-def extract(request: URLRequest):
+# ============================================================
+# EXTRACT
+# ============================================================
 
-    url = request.url.strip()
+@app.get("/api/extract")
+def api_extract(
+    url: str = Query(..., description="YouTube URL")
+):
 
-    if not url.startswith(("http://", "https://")):
+    if not url:
         raise HTTPException(
             status_code=400,
-            detail="Valid URL required"
+            detail="URL is required"
         )
 
-    platform_name = detect_platform(url)
+    if "youtube.com" not in url and "youtu.be" not in url:
+        raise HTTPException(
+            status_code=400,
+            detail="Only YouTube URLs are supported"
+        )
 
-    ydl_options = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
+    try:
+        info = extract_info(url)
 
-        # Do not download anything during extraction
-        "noplaylist": True,
+        return build_response(info)
 
-        # Prefer public information
-        "extract_flat": False,
-    }
+    except Exception as e:
+
+        error = clean_text(str(e))
+
+        raise HTTPException(
+            status_code=500,
+            detail=error
+        )
+
+
+# ============================================================
+# FORMATS
+# ============================================================
+
+@app.get("/api/formats")
+def api_formats(
+    url: str = Query(..., description="YouTube URL")
+):
 
     try:
 
-        with yt_dlp.YoutubeDL(ydl_options) as ydl:
-
-            info = ydl.extract_info(
-                url,
-                download=False
-            )
-
-        if not info:
+        if (
+            "youtube.com" not in url
+            and "youtu.be" not in url
+        ):
             raise HTTPException(
-                status_code=404,
-                detail="No media information found"
+                status_code=400,
+                detail="Only YouTube URLs are supported"
             )
 
-        media = extract_media(info)
+        info = extract_info(url)
 
-        result = {
+        formats = get_formats(info)
+
+        return {
             "success": True,
-            "type": "video"
-            if any(x["type"] == "video" for x in media)
-            else "photo",
-
-            "platform": platform_name,
-
             "id": info.get("id"),
-
-            "username": (
-                info.get("uploader_id")
-                or info.get("channel")
-                or info.get("uploader")
-                or info.get("creator")
-            ),
-
-            "profile_image_uri": (
-                info.get("channel_favicon")
-                or info.get("thumbnail")
-            ),
-
-            "caption": (
-                info.get("description")
-                or info.get("title")
-                or ""
-            ),
-
             "title": info.get("title"),
-
-            "duration": iso_duration(
-                info.get("duration")
-            ),
-
-            "webpage_url": info.get("webpage_url"),
-
             "thumbnail": info.get("thumbnail"),
-
-            "media": media
+            "formats": formats
         }
 
-        return result
-
-    except yt_dlp.utils.DownloadError as e:
-
-        raise HTTPException(
-            status_code=400,
-            detail=str(e)
-        )
+    except HTTPException:
+        raise
 
     except Exception as e:
 
@@ -319,3 +411,204 @@ def extract(request: URLRequest):
             status_code=500,
             detail=str(e)
         )
+
+
+# ============================================================
+# DOWNLOAD
+# ============================================================
+
+@app.get("/api/download")
+def api_download(
+    url: str = Query(..., description="YouTube URL"),
+
+    format_id: str = Query(
+        "bestvideo+bestaudio/best",
+        description="yt-dlp format"
+    )
+):
+
+    if (
+        "youtube.com" not in url
+        and "youtu.be" not in url
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Only YouTube URLs are supported"
+        )
+
+    job_id = uuid.uuid4().hex
+
+    job_dir = DOWNLOAD_DIR / job_id
+    job_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    output_template = str(
+        job_dir / "%(title)s.%(ext)s"
+    )
+
+    options = {
+        "quiet": True,
+        "no_warnings": False,
+
+        "noplaylist": True,
+
+        "format": format_id,
+
+        "outtmpl": output_template,
+
+        # Merge audio/video
+        "merge_output_format": "mp4",
+
+        # EJS
+        "js_runtimes": {
+            "deno": {}
+        },
+
+        "remote_components": {
+            "ejs": ["github"]
+        },
+
+        # PO token provider
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["mweb"]
+            }
+        }
+    }
+
+    try:
+
+        with yt_dlp.YoutubeDL(options) as ydl:
+
+            info = ydl.extract_info(
+                url,
+                download=True
+            )
+
+            requested = info.get(
+                "requested_downloads"
+            )
+
+            downloaded_file = None
+
+            if requested:
+
+                for item in requested:
+
+                    filepath = item.get(
+                        "filepath"
+                    )
+
+                    if filepath:
+                        downloaded_file = filepath
+                        break
+
+            if not downloaded_file:
+
+                prepared = ydl.prepare_filename(info)
+
+                if os.path.exists(prepared):
+                    downloaded_file = prepared
+
+                else:
+
+                    # Find downloaded file
+                    files = list(
+                        job_dir.glob("*")
+                    )
+
+                    if files:
+                        downloaded_file = str(
+                            files[0]
+                        )
+
+            if not downloaded_file:
+
+                raise Exception(
+                    "Downloaded file could not be found"
+                )
+
+        file_path = Path(downloaded_file)
+
+        if not file_path.exists():
+
+            raise Exception(
+                "Downloaded file does not exist"
+            )
+
+        filename = safe_filename(
+            file_path.stem
+        )
+
+        extension = file_path.suffix
+
+        download_name = (
+            filename + extension
+        )
+
+        def file_iterator():
+
+            try:
+
+                with open(
+                    file_path,
+                    "rb"
+                ) as file:
+
+                    while True:
+
+                        chunk = file.read(
+                            1024 * 1024
+                        )
+
+                        if not chunk:
+                            break
+
+                        yield chunk
+
+            finally:
+
+                try:
+                    shutil.rmtree(
+                        job_dir,
+                        ignore_errors=True
+                    )
+                except Exception:
+                    pass
+
+        return StreamingResponse(
+            file_iterator(),
+            media_type="application/octet-stream",
+            headers={
+                "Content-Disposition":
+                    f'attachment; filename="{download_name}"'
+            }
+        )
+
+    except Exception as e:
+
+        shutil.rmtree(
+            job_dir,
+            ignore_errors=True
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(e)
+        )
+
+
+# ============================================================
+# TEST ENDPOINT
+# ============================================================
+
+@app.get("/api/test")
+def test():
+
+    return {
+        "success": True,
+        "message": "YouTube Downloader API is working",
+        "yt_dlp": yt_dlp.version.__version__
+    }
