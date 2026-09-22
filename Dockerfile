@@ -18,13 +18,11 @@ RUN curl -fsSL https://deno.land/install.sh | sh
 ENV DENO_INSTALL=/root/.deno
 ENV PATH="/root/.deno/bin:$PATH"
 
-COPY requirements.txt /app/requirements.txt
+COPY requirements.txt .
 
 RUN python -m pip install --upgrade pip && \
-    python -m pip install --no-cache-dir -r /app/requirements.txt
+    python -m pip install --no-cache-dir -r requirements.txt
 
-COPY app.py /app/app.py
+COPY app.py .
 
-EXPOSE 10000
-
-CMD ["python", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "10000"]
+CMD ["sh", "-c", "python -m uvicorn app:app --host 0.0.0.0 --port ${PORT:-10000}"]
