@@ -1,6 +1,10 @@
 FROM python:3.12-slim
 
-# System packages
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     curl \
@@ -8,30 +12,19 @@ RUN apt-get update && apt-get install -y \
     unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Deno
+# Deno
 RUN curl -fsSL https://deno.land/install.sh | sh
 
 ENV DENO_INSTALL=/root/.deno
 ENV PATH="/root/.deno/bin:$PATH"
 
-# App directory
-WORKDIR /app
+COPY requirements.txt /app/requirements.txt
 
-# Dependencies
-COPY requirements.txt .
+RUN python -m pip install --upgrade pip && \
+    python -m pip install --no-cache-dir -r /app/requirements.txt
 
-RUN python -m pip install --no-cache-dir --upgrade pip \
-    && python -m pip install --no-cache-dir \
-    fastapi \
-    "uvicorn[standard]" \
-    yt-dlp \
-    yt-dlp-ejs \
-    python-multipart
+COPY app.py /app/app.py
 
-# Application
-COPY app.py .
+EXPOSE 10000
 
-ENV PYTHONUNBUFFERED=1
-
-# Render PORT
-CMD ["sh", "-c", "python -m uvicorn app:app --host 0.0.0.0 --port ${PORT:-10000}"]
+CMD ["python", "-m", "uvicorn", "app:app", "--host", "0.0.0.0", "--port", "10000"]
