@@ -1,4 +1,5 @@
 fastapi
 uvicorn[standard]
-yt-dlp
 python-multipart
+yt-dlp
+yt-dlp-ejs
