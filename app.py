@@ -9,6 +9,10 @@ import shutil
 import os
 import re
 import uuid
+import subprocess
+import urllib.request
+import urllib.error
+
 from pathlib import Path
 
 
@@ -19,7 +23,7 @@ from pathlib import Path
 app = FastAPI(
     title="Vatsraj Tech YouTube Downloader API",
     description="YouTube downloader API using FastAPI + yt-dlp + BgUtils",
-    version="2.0.0"
+    version="2.1.0"
 )
 
 
@@ -40,14 +44,19 @@ app.add_middleware(
 # DIRECTORIES
 # =========================================================
 
-DOWNLOAD_DIR = Path(
-    tempfile.gettempdir()
-) / "vatsraj_ytdlp"
+DOWNLOAD_DIR = Path(tempfile.gettempdir()) / "vatsraj_ytdlp"
 
 DOWNLOAD_DIR.mkdir(
     parents=True,
     exist_ok=True
 )
+
+
+# =========================================================
+# CONSTANTS
+# =========================================================
+
+BGUTIL_URL = "http://127.0.0.1:4416"
 
 
 # =========================================================
@@ -60,14 +69,14 @@ BASE_OPTIONS = {
     "quiet": True,
     "no_warnings": False,
 
-    # One video
+    # One video only
     "noplaylist": True,
 
-    # Don't download during extraction
+    # Extraction only
     "skip_download": True,
 
     # -----------------------------------------------------
-    # EJS
+    # EJS / DENO
     # -----------------------------------------------------
 
     "js_runtimes": {
@@ -79,7 +88,7 @@ BASE_OPTIONS = {
     },
 
     # -----------------------------------------------------
-    # YouTube
+    # YOUTUBE
     # -----------------------------------------------------
 
     "extractor_args": {
@@ -89,11 +98,11 @@ BASE_OPTIONS = {
         },
 
         # -------------------------------------------------
-        # BgUtils PO Token provider
+        # BGUTIL PO TOKEN PROVIDER
         # -------------------------------------------------
 
         "youtubepot-bgutilhttp": {
-            "base_url": "http://127.0.0.1:4416"
+            "base_url": BGUTIL_URL
         }
     }
 }
@@ -156,6 +165,7 @@ def iso_duration(seconds):
     secs = seconds % 60
 
     if hours:
+
         return (
             f"PT{hours}H"
             f"{minutes}M"
@@ -163,6 +173,7 @@ def iso_duration(seconds):
         )
 
     if minutes:
+
         return (
             f"PT{minutes}M"
             f"{secs}S"
@@ -181,7 +192,11 @@ def format_quality(fmt):
     abr = fmt.get("abr")
 
     if abr:
-        return f"{int(abr)}kbps"
+
+        try:
+            return f"{int(abr)}kbps"
+        except Exception:
+            return f"{abr}kbps"
 
     return "unknown"
 
@@ -312,7 +327,7 @@ def extract_formats(info):
 
 
 # =========================================================
-# EXTRACT INFO
+# GET VIDEO INFO
 # =========================================================
 
 def get_video_info(url):
@@ -346,7 +361,7 @@ def build_json(info):
     media = []
 
     # -----------------------------------------------------
-    # Video
+    # VIDEO
     # -----------------------------------------------------
 
     media.append({
@@ -394,7 +409,7 @@ def build_json(info):
     })
 
     # -----------------------------------------------------
-    # Thumbnail
+    # THUMBNAIL
     # -----------------------------------------------------
 
     if thumbnail:
@@ -431,7 +446,6 @@ def build_json(info):
             "quality":
                 "HD Full"
         })
-
 
     return {
 
@@ -522,7 +536,7 @@ def home():
             "Vatsraj Tech YouTube Downloader",
 
         "version":
-            "2.0.0",
+            "2.1.0",
 
         "status":
             "online",
@@ -540,6 +554,9 @@ def home():
 
             "download":
                 "/api/download?url=YOUTUBE_URL",
+
+            "test":
+                "/api/test-youtube?url=YOUTUBE_URL",
 
             "health":
                 "/health",
@@ -580,6 +597,58 @@ def health():
 @app.get("/api/debug")
 def debug():
 
+    deno_version = None
+    deno_error = None
+
+    try:
+
+        result = subprocess.run(
+            ["deno", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+
+        deno_version = result.stdout.strip()
+
+        if result.returncode != 0:
+            deno_error = result.stderr.strip()
+
+    except Exception as error:
+
+        deno_error = str(error)
+
+
+    # -----------------------------------------------------
+    # BGUTIL CONNECTIVITY
+    # -----------------------------------------------------
+
+    bgutil_status = "unknown"
+    bgutil_error = None
+
+    try:
+
+        response = urllib.request.urlopen(
+            BGUTIL_URL,
+            timeout=5
+        )
+
+        bgutil_status = (
+            f"reachable ({response.status})"
+        )
+
+    except urllib.error.HTTPError as error:
+
+        bgutil_status = (
+            f"reachable ({error.code})"
+        )
+
+    except Exception as error:
+
+        bgutil_status = "not_reachable"
+        bgutil_error = str(error)
+
+
     return {
 
         "success":
@@ -588,8 +657,29 @@ def debug():
         "yt_dlp":
             yt_dlp.version.__version__,
 
-        "pot_provider":
-            "http://127.0.0.1:4416",
+        "deno":
+            {
+                "available":
+                    deno_version is not None,
+
+                "version":
+                    deno_version,
+
+                "error":
+                    deno_error
+            },
+
+        "bgutil":
+            {
+                "url":
+                    BGUTIL_URL,
+
+                "status":
+                    bgutil_status,
+
+                "error":
+                    bgutil_error
+            },
 
         "js_runtime":
             "deno",
@@ -600,6 +690,269 @@ def debug():
         "youtube_client":
             "mweb"
     }
+
+
+# =========================================================
+# YOUTUBE DIAGNOSTIC TEST
+# =========================================================
+
+@app.get("/api/test-youtube")
+def test_youtube(
+    url: str = Query(
+        "https://www.youtube.com/watch?v=jn6J5By5hRI",
+        description="YouTube URL for diagnostic test"
+    )
+):
+
+    result = {
+
+        "success":
+            False,
+
+        "url":
+            url,
+
+        "checks":
+            {}
+    }
+
+
+    # -----------------------------------------------------
+    # CHECK 1 - URL
+    # -----------------------------------------------------
+
+    if not is_youtube_url(url):
+
+        result["checks"]["url"] = {
+
+            "passed":
+                False,
+
+            "message":
+                "URL is not a valid YouTube URL."
+        }
+
+        return result
+
+
+    result["checks"]["url"] = {
+
+        "passed":
+            True,
+
+        "message":
+            "YouTube URL detected."
+    }
+
+
+    # -----------------------------------------------------
+    # CHECK 2 - DENO
+    # -----------------------------------------------------
+
+    try:
+
+        deno = subprocess.run(
+            ["deno", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+
+        if deno.returncode == 0:
+
+            result["checks"]["deno"] = {
+
+                "passed":
+                    True,
+
+                "version":
+                    deno.stdout.strip()
+            }
+
+        else:
+
+            result["checks"]["deno"] = {
+
+                "passed":
+                    False,
+
+                "error":
+                    deno.stderr.strip()
+            }
+
+    except Exception as error:
+
+        result["checks"]["deno"] = {
+
+            "passed":
+                False,
+
+            "error":
+                str(error)
+        }
+
+
+    # -----------------------------------------------------
+    # CHECK 3 - BGUTIL
+    # -----------------------------------------------------
+
+    try:
+
+        response = urllib.request.urlopen(
+            BGUTIL_URL,
+            timeout=5
+        )
+
+        result["checks"]["bgutil"] = {
+
+            "passed":
+                True,
+
+            "status":
+                response.status,
+
+            "message":
+                "BgUtils HTTP server is reachable."
+        }
+
+    except urllib.error.HTTPError as error:
+
+        # HTTP 404/405 still proves server is alive.
+        result["checks"]["bgutil"] = {
+
+            "passed":
+                True,
+
+            "status":
+                error.code,
+
+            "message":
+                "BgUtils server is reachable."
+        }
+
+    except Exception as error:
+
+        result["checks"]["bgutil"] = {
+
+            "passed":
+                False,
+
+            "error":
+                str(error)
+        }
+
+
+    # -----------------------------------------------------
+    # CHECK 4 - YT-DLP EXTRACTION
+    # -----------------------------------------------------
+
+    try:
+
+        options = BASE_OPTIONS.copy()
+
+        options["quiet"] = False
+
+        with yt_dlp.YoutubeDL(
+            options
+        ) as ydl:
+
+            info = ydl.extract_info(
+                url,
+                download=False
+            )
+
+
+        result["checks"]["youtube"] = {
+
+            "passed":
+                True,
+
+            "id":
+                info.get("id"),
+
+            "title":
+                info.get("title"),
+
+            "duration":
+                info.get("duration"),
+
+            "formats":
+                len(
+                    info.get(
+                        "formats",
+                        []
+                    )
+                )
+        }
+
+        result["success"] = True
+
+        result["message"] = (
+            "YouTube extraction is working."
+        )
+
+    except Exception as error:
+
+        error_text = str(error)
+
+        result["checks"]["youtube"] = {
+
+            "passed":
+                False,
+
+            "error":
+                error_text
+        }
+
+        # -------------------------------------------------
+        # ERROR CLASSIFICATION
+        # -------------------------------------------------
+
+        if (
+            "Sign in to confirm" in error_text
+            or
+            "not a bot" in error_text
+            or
+            "LOGIN_REQUIRED" in error_text
+        ):
+
+            result["message"] = (
+                "YouTube is rejecting this server request "
+                "with an authentication/bot check."
+            )
+
+        elif (
+            "PO Token" in error_text
+            or
+            "pot" in error_text.lower()
+        ):
+
+            result["message"] = (
+                "The request appears to have a PO-token/provider issue."
+            )
+
+        elif (
+            "deno" in error_text.lower()
+            or
+            "javascript" in error_text.lower()
+            or
+            "ejs" in error_text.lower()
+        ):
+
+            result["message"] = (
+                "The YouTube JavaScript/EJS runtime setup "
+                "appears to have a problem."
+            )
+
+        else:
+
+            result["message"] = (
+                "yt-dlp extraction failed. "
+                "See checks.youtube.error."
+            )
+
+
+    return result
 
 
 # =========================================================
@@ -634,9 +987,7 @@ def extract(
     except Exception as error:
 
         raise HTTPException(
-
             status_code=500,
-
             detail=str(error)
         )
 
@@ -718,7 +1069,7 @@ def download(
 
 
     # -----------------------------------------------------
-    # Job folder
+    # JOB FOLDER
     # -----------------------------------------------------
 
     job_id = uuid.uuid4().hex
@@ -741,7 +1092,7 @@ def download(
 
 
     # -----------------------------------------------------
-    # Download options
+    # DOWNLOAD OPTIONS
     # -----------------------------------------------------
 
     options = {
@@ -784,7 +1135,7 @@ def download(
             # BgUtils
             "youtubepot-bgutilhttp": {
                 "base_url":
-                    "http://127.0.0.1:4416"
+                    BGUTIL_URL
             }
         }
     }
@@ -801,8 +1152,9 @@ def download(
                 download=True
             )
 
+
             # -------------------------------------------------
-            # Find downloaded file
+            # FIND DOWNLOADED FILE
             # -------------------------------------------------
 
             downloaded_file = None
@@ -821,16 +1173,19 @@ def download(
                         "filepath"
                     )
 
-                    if filepath and os.path.exists(
+                    if (
                         filepath
+                        and
+                        os.path.exists(filepath)
                     ):
 
                         downloaded_file = filepath
+
                         break
 
 
             # -------------------------------------------------
-            # Fallback
+            # FALLBACK
             # -------------------------------------------------
 
             if not downloaded_file:
@@ -851,7 +1206,7 @@ def download(
 
 
             # -------------------------------------------------
-            # Search folder
+            # SEARCH FOLDER
             # -------------------------------------------------
 
             if not downloaded_file:
@@ -887,7 +1242,7 @@ def download(
 
 
         # -----------------------------------------------------
-        # Filename
+        # FILENAME
         # -----------------------------------------------------
 
         filename = clean_filename(
@@ -905,7 +1260,7 @@ def download(
 
 
         # -----------------------------------------------------
-        # Stream file
+        # STREAM FILE
         # -----------------------------------------------------
 
         def stream_file():
@@ -965,8 +1320,6 @@ def download(
         )
 
         raise HTTPException(
-
             status_code=500,
-
             detail=str(error)
         )
