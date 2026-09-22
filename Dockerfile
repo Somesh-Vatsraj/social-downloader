@@ -1,5 +1,6 @@
 FROM python:3.12-slim
 
+# System packages
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     curl \
@@ -7,21 +8,30 @@ RUN apt-get update && apt-get install -y \
     unzip \
     && rm -rf /var/lib/apt/lists/*
 
-# Deno
+# Install Deno
 RUN curl -fsSL https://deno.land/install.sh | sh
 
 ENV DENO_INSTALL=/root/.deno
 ENV PATH="/root/.deno/bin:$PATH"
 
+# App directory
 WORKDIR /app
 
+# Dependencies
 COPY requirements.txt .
 
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -U "yt-dlp[default]"
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir \
+    fastapi \
+    "uvicorn[standard]" \
+    yt-dlp \
+    yt-dlp-ejs \
+    python-multipart
 
+# Application
 COPY app.py .
 
 ENV PYTHONUNBUFFERED=1
 
-CMD uvicorn app:app --host 0.0.0.0 --port ${PORT:-8000}
+# Render PORT
+CMD ["sh", "-c", "python -m uvicorn app:app --host 0.0.0.0 --port ${PORT:-10000}"]
