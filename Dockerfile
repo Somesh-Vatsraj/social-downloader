@@ -5,13 +5,18 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Basic packages only
+# Basic system packages
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
        ffmpeg \
        curl \
        ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Deno
+RUN curl -fsSL https://deno.land/install.sh | sh
+
+ENV PATH="/root/.deno/bin:${PATH}"
 
 # Install Python dependencies
 COPY requirements.txt .
@@ -21,9 +26,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application
 COPY app.py .
 
-# Non-root user
+# Create non-root user
 RUN useradd -m appuser \
-    && chown -R appuser:appuser /app
+    && chown -R appuser:appuser /app \
+    && chown -R appuser:appuser /root/.deno
 
 USER appuser
 
