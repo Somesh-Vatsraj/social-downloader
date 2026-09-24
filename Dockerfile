@@ -14,6 +14,7 @@ RUN apt-get update \
         ffmpeg \
         curl \
         ca-certificates \
+        unzip \
     && rm -rf /var/lib/apt/lists/*
 
 # ----------------------------------------
@@ -25,7 +26,7 @@ RUN curl -fsSL https://deno.land/install.sh | sh
 ENV PATH="/root/.deno/bin:${PATH}"
 
 # ----------------------------------------
-# Python dependencies
+# Install Python dependencies
 # ----------------------------------------
 
 COPY requirements.txt .
@@ -33,13 +34,13 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # ----------------------------------------
-# Application
+# Copy application
 # ----------------------------------------
 
 COPY main.py .
 
 # ----------------------------------------
-# Non-root user
+# Create non-root user
 # ----------------------------------------
 
 RUN useradd -m appuser \
