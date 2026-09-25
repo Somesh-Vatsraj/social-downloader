@@ -1,62 +1,21 @@
-FROM python:3.12-slim
+FROM python:3.11-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
+# Install ffmpeg + curl for yt-dlp
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# ----------------------------------------
-# System packages
-# ----------------------------------------
-
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        ffmpeg \
-        curl \
-        ca-certificates \
-        unzip \
-    && rm -rf /var/lib/apt/lists/*
-
-# ----------------------------------------
-# Install Deno
-# ----------------------------------------
-
-RUN curl -fsSL https://deno.land/install.sh | sh
-
-ENV PATH="/root/.deno/bin:${PATH}"
-
-# ----------------------------------------
-# Install Python dependencies
-# ----------------------------------------
-
 COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir -U yt-dlp
 
-RUN pip install --no-cache-dir -r requirements.txt
+COPY . .
 
-# ----------------------------------------
-# Copy application
-# ----------------------------------------
+ENV PORT=8000
+EXPOSE 8000
 
-COPY main.py .
-
-# ----------------------------------------
-# Create non-root user
-# ----------------------------------------
-
-RUN useradd -m appuser \
-    && chown -R appuser:appuser /app \
-    && chown -R appuser:appuser /root/.deno
-
-USER appuser
-
-# ----------------------------------------
-# Port
-# ----------------------------------------
-
-EXPOSE 8080
-
-# ----------------------------------------
-# Start FastAPI
-# ----------------------------------------
-
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD uvicorn main:app --host 0.0.0.0 --port ${PORT}
