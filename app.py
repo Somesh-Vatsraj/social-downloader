@@ -1,9 +1,7 @@
 # ============================================================
 #  app.py — Sarathi DL Details Fetcher
 #  FREE OCR (ddddocr) + Manual fallback + Flask
-#  Render-ready
 # ============================================================
-
 import os
 import re
 import time
@@ -12,15 +10,13 @@ import uuid
 import base64
 import random
 import string
-import secrets
-import threading
 import traceback
 from datetime import datetime
+from urllib.parse import urlencode
 
 from flask import Flask, request, jsonify, render_template, Response
 import requests
 
-# ---------- FREE OCR ----------
 try:
     import ddddocr
     OCR = ddddocr.DdddOcr(show_ad=False)
@@ -34,9 +30,6 @@ except Exception as e:
 app = Flask(__name__)
 app.config["JSON_AS_ASCII"] = False
 
-# ============================================================
-#  Constants
-# ============================================================
 BASE = "https://sarathi.parivahan.gov.in/sarathiservice/"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
       "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -52,12 +45,12 @@ STATE_CODES = {
     "Uttarakhand": "UK", "Himachal Pradesh": "HP", "Goa": "GA",
 }
 
-TMP = "/tmp"  # Render Linux
+TMP = "/tmp"
 if not os.path.isdir(TMP):
     TMP = os.environ.get("TEMP", ".")
 
 # ============================================================
-#  File-based session store
+#  File-based session
 # ============================================================
 def sid_dir(sid: str) -> str:
     sid = re.sub(r"[^a-f0-9]", "", sid) or "default"
@@ -103,16 +96,46 @@ def chrome_boundary():
     return "----WebKitFormBoundary" + "".join(random.choices(chars, k=16))
 
 # ============================================================
+#  Cookie helpers
+# ============================================================
+def _load_cookies(session, jar_path):
+    if not os.path.isfile(jar_path): return
+    try:
+        with open(jar_path) as f: data = json.load(f)
+        for c in data:
+            session.cookies.set(
+                c.get("name", ""),
+                c.get("value", ""),
+                domain=c.get("domain") or None,
+                path=c.get("path") or "/",
+            )
+    except Exception as e:
+        print(f"[!] load cookies: {e}", flush=True)
+
+def _save_cookies(session, jar_path):
+    try:
+        cookies = []
+        for c in session.cookies:
+            cookies.append({
+                "name": c.name, "value": c.value,
+                "domain": c.domain, "path": c.path,
+            })
+        with open(jar_path, "w") as f: json.dump(cookies, f)
+    except Exception as e:
+        print(f"[!] save cookies: {e}", flush=True)
+
+# ============================================================
 #  HTTP helpers
 # ============================================================
 def req(sid, url, post=None, referer=None, ajax=False):
-    jar = sid_jar(sid)
+    jar_path = sid_jar(sid)
+    s = requests.Session()
+    _load_cookies(s, jar_path)
+
     headers = {
         "User-Agent": UA,
-        "Accept": (
-            "application/json, text/javascript, */*; q=0.01" if ajax
-            else "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-        ),
+        "Accept": ("application/json, text/javascript, */*; q=0.01" if ajax
+                   else "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"),
         "Accept-Language": "en-US,en;q=0.9",
         "Cache-Control": "no-cache",
         "Origin": "https://sarathi.parivahan.gov.in",
@@ -123,31 +146,25 @@ def req(sid, url, post=None, referer=None, ajax=False):
 
     try:
         if post is None:
-            r = requests.get(url, headers=headers, timeout=45,
-                             verify=True, allow_redirects=True)
+            r = s.get(url, headers=headers, timeout=45, verify=True, allow_redirects=True)
         else:
             if ajax:
                 headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8"
-                r = requests.post(url, headers=headers, data=post, timeout=45,
-                                  verify=True, allow_redirects=True)
-            else:
-                r = requests.post(url, headers=headers,
-                                  data=post if isinstance(post, (bytes, str)) else
-                                       {k: v for k, v in post.items()},
-                                  timeout=45, verify=True, allow_redirects=True)
+            r = s.post(url, headers=headers, data=post, timeout=45,
+                       verify=True, allow_redirects=True)
+        _save_cookies(s, jar_path)
         return {"body": r.content, "text": r.text, "http": r.status_code, "err": ""}
     except Exception as e:
+        _save_cookies(s, jar_path)
         return {"body": b"", "text": "", "http": 0, "err": str(e)}
 
 
 def req_multipart_pairs(sid, url, pairs, referer=None):
-    """
-    pairs: list of (name, value) tuples — duplicates allowed, order preserved.
-    Uses requests, which handles cookies via session.
-    """
-    jar = sid_jar(sid)
-    boundary = chrome_boundary()
+    jar_path = sid_jar(sid)
+    s = requests.Session()
+    _load_cookies(s, jar_path)
 
+    boundary = chrome_boundary()
     parts = []
     for name, value in pairs:
         parts.append(f"--{boundary}\r\n")
@@ -155,7 +172,7 @@ def req_multipart_pairs(sid, url, pairs, referer=None):
         parts.append(str(value))
         parts.append("\r\n")
     parts.append(f"--{boundary}--\r\n")
-    body = "".join(parts)
+    body_str = "".join(parts)
 
     headers = {
         "User-Agent": UA,
@@ -169,16 +186,18 @@ def req_multipart_pairs(sid, url, pairs, referer=None):
     if referer: headers["Referer"] = referer
 
     try:
-        r = requests.post(url, headers=headers, data=body.encode("utf-8"),
-                          timeout=60, verify=True, allow_redirects=True)
+        r = s.post(url, headers=headers, data=body_str.encode("utf-8"),
+                   timeout=60, verify=True, allow_redirects=True)
+        _save_cookies(s, jar_path)
         return {"body": r.content, "text": r.text, "http": r.status_code,
-                "err": "", "sent_body": body}
+                "err": "", "sent_body": body_str}
     except Exception as e:
-        return {"body": b"", "text": "", "http": 0, "err": str(e), "sent_body": body}
-
+        _save_cookies(s, jar_path)
+        return {"body": b"", "text": "", "http": 0, "err": str(e),
+                "sent_body": body_str}
 
 # ============================================================
-#  Parse helpers
+#  Parsers
 # ============================================================
 def extract_token(html: str):
     m = re.search(r'<input[^>]*name=["\']token["\'][^>]*value=["\']([^"\']+)', html, re.I)
@@ -187,23 +206,23 @@ def extract_token(html: str):
     if m: return m.group(1)
     return None
 
-
 def page_title(html: str) -> str:
     m = re.search(r'<title>([^<]*)</title>', html, re.I)
     return m.group(1).strip() if m else "unknown"
 
-
 def parse_ajax(body: str):
     body = (body or "").strip()
+    if not body:
+        return {"ok": False, "status": "EMPTY", "raw": ""}
     try:
         j = json.loads(body)
-    except Exception:
-        return {"ok": False, "status": "PARSE_ERROR", "raw": body[:200]}
+    except Exception as e:
+        return {"ok": False, "status": "PARSE_ERROR", "raw": body[:500], "err": str(e)}
     if not isinstance(j, list) or len(j) < 3:
-        return {"ok": False, "status": "PARSE_ERROR", "raw": body[:200]}
+        return {"ok": False, "status": "PARSE_ERROR", "raw": body[:500]}
     status = j[1] if len(j) > 1 else ""
     if status != "OK":
-        return {"ok": False, "status": str(status), "raw": body[:200]}
+        return {"ok": False, "status": str(status), "raw": body[:500]}
     combined = str(j[2]) if len(j) > 2 else ""
     state, name = "", ""
     if "@" in combined:
@@ -215,144 +234,93 @@ def parse_ajax(body: str):
         "state": state.strip(),
         "name": name.strip(),
         "rto": str(j[3]).strip() if len(j) > 3 else "",
-        "raw": body[:200],
+        "raw": body[:500],
     }
 
-
 def clean_html_for_matching(html: str) -> str:
-    """HTML comments और <script> blocks हटाओ (regex false positive से बचने के लिए)"""
     html = re.sub(r"<!--.*?-->", "", html, flags=re.S)
     html = re.sub(r"<script\b[^>]*>.*?</script>", "", html, flags=re.S | re.I)
     return html
 
-
 def is_dl_page(html: str) -> bool:
     clean = clean_html_for_matching(html)
-
-    # 1) photo / signature base64
     if re.search(r'name="imgHid"\s+value="data:image', clean, re.I): return True
     if re.search(r'name="sigHid"\s+value="data:image', clean, re.I): return True
-
-    # 2) Name non-empty
     m = re.search(
         r'<td[^>]*text-success[^>]*>\s*Name\s*:\s*</td>\s*<td[^>]*>\s*([^<\s][^<]*?)</td>',
         clean, re.I
     )
-    if m:
-        name = m.group(1).strip()
-        if len(name) > 2 and "text-left" not in name.lower():
-            return True
-
-    # 3) Father's name non-empty
+    if m and len(m.group(1).strip()) > 2 and "text-left" not in m.group(1).lower():
+        return True
     m = re.search(
         r'<td[^>]*text-success[^>]*>\s*Father\'?s?\s*Name\s*:\s*</td>\s*<td[^>]*>\s*([^<\s][^<]*?)</td>',
         clean, re.I
     )
-    if m:
-        v = m.group(1).strip()
-        if len(v) > 2 and "text-left" not in v.lower():
-            return True
-
+    if m and len(m.group(1).strip()) > 2 and "text-left" not in m.group(1).lower():
+        return True
     return False
 
-
 def parse_dl(html: str) -> dict:
-    # ✅ Comments + scripts हटाओ
     html = clean_html_for_matching(html)
-
     out = {
-        "dlno": "", "name": "", "father_name": "", "dob": "",
-        "blood_group": "", "category": "", "present_address": "",
-        "last_endorsed_state": "", "last_endorsed_rto": "",
-        "class_of_vehicles": [], "validity": "", "badge_numbers": [],
-        "photo": "", "signature": "",
+        "dlno":"","name":"","father_name":"","dob":"","blood_group":"","category":"",
+        "present_address":"","last_endorsed_state":"","last_endorsed_rto":"",
+        "class_of_vehicles":[],"validity":"","badge_numbers":[],"photo":"","signature":"",
     }
-
-    def find(pattern, src=None, flags=re.I | re.S):
-        m = re.search(pattern, src if src is not None else html, flags)
+    def find(p, src=None, flags=re.I|re.S):
+        m = re.search(p, src if src is not None else html, flags)
         return m.group(1).strip() if m else ""
+    def clean(s): return re.sub(r"\s+", " ", s).strip()
 
-    def clean(s):
-        return re.sub(r"\s+", " ", s).strip()
+    out["name"] = clean(find(r'<td[^>]*text-success[^>]*>\s*Name\s*:\s*</td>\s*<td[^>]*>\s*([^<\s][^<]*?)\s*</td>'))
+    out["father_name"] = clean(find(r'<td[^>]*text-success[^>]*>\s*Father\'?s?\s*Name\s*:\s*</td>\s*<td[^>]*>\s*([^<\s][^<]*?)\s*</td>'))
+    out["dob"] = clean(find(r'<td[^>]*text-success[^>]*>\s*Date of Birth\s*:\s*</td>\s*<td[^>]*>\s*([^<\s][^<]*?)\s*</td>'))
+    out["blood_group"] = clean(find(r'<td[^>]*text-success[^>]*>\s*Blood Group\s*:\s*</td>\s*<td[^>]*>\s*([^<\s][^<]*?)\s*</td>'))
+    out["category"] = clean(find(r'<td[^>]*text-success[^>]*>\s*Category[^<:]*:\s*</td>\s*<td[^>]*>\s*([^<\s][^<]*?)\s*</td>'))
 
-    out["name"] = clean(find(
-        r'<td[^>]*text-success[^>]*>\s*Name\s*:\s*</td>\s*<td[^>]*>\s*([^<\s][^<]*?)\s*</td>'
-    ))
-    out["father_name"] = clean(find(
-        r'<td[^>]*text-success[^>]*>\s*Father\'?s?\s*Name\s*:\s*</td>\s*<td[^>]*>\s*([^<\s][^<]*?)\s*</td>'
-    ))
-    out["dob"] = clean(find(
-        r'<td[^>]*text-success[^>]*>\s*Date of Birth\s*:\s*</td>\s*<td[^>]*>\s*([^<\s][^<]*?)\s*</td>'
-    ))
-    out["blood_group"] = clean(find(
-        r'<td[^>]*text-success[^>]*>\s*Blood Group\s*:\s*</td>\s*<td[^>]*>\s*([^<\s][^<]*?)\s*</td>'
-    ))
-    out["category"] = clean(find(
-        r'<td[^>]*text-success[^>]*>\s*Category[^<:]*:\s*</td>\s*<td[^>]*>\s*([^<\s][^<]*?)\s*</td>'
-    ))
-
-    # Present Address (multi-line)
-    m = re.search(
-        r'Present Address\s*:\s*</td>\s*<td[^>]*>([^<]*)</td>(.*?)</table>',
-        html, re.I | re.S
-    )
+    m = re.search(r'Present Address\s*:\s*</td>\s*<td[^>]*>([^<]*)</td>(.*?)</table>', html, re.I|re.S)
     if m:
         addr = clean(m.group(1))
-        lines = re.findall(r'<td[^>]*class="text-left"[^>]*>([^<]+)</td>', m.group(2), re.I)
-        for line in lines:
+        for line in re.findall(r'<td[^>]*class="text-left"[^>]*>([^<]+)</td>', m.group(2), re.I):
             line = clean(line)
-            if line:
-                addr = (addr + ", " + line) if addr else line
+            if line: addr = (addr + ", " + line) if addr else line
         out["present_address"] = addr
 
-    # ✅ State — visible <b class="text-success"> State- </b>
     out["last_endorsed_state"] = clean(find(
         r'<b[^>]*class="[^"]*text-success[^"]*"[^>]*>\s*State\s*-\s*</b>\s*([^<\s][^<]*)'
     ))
-
-    # ✅ RTO — visible <b class="text-success"> RTO - </b>
     out["last_endorsed_rto"] = clean(find(
         r'<b[^>]*class="[^"]*text-success[^"]*"[^>]*>\s*RTO\s*-\s*</b>\s*([^<\s][^<]*)'
     ))
 
-    # Class of vehicles
-    m = re.search(r'Class of Vehicles\s*:.*?<table[^>]*>(.*?)</table>', html, re.I | re.S)
+    m = re.search(r'Class of Vehicles\s*:.*?<table[^>]*>(.*?)</table>', html, re.I|re.S)
     if m:
-        rows = re.findall(
+        for cov, issue in re.findall(
             r'<tr>\s*<td[^>]*>([A-Z0-9\-]+)</td>.*?<b class="control-label">\s*([^<]+?)</b>',
-            m.group(1), re.I | re.S
-        )
-        for cov, issue in rows:
-            out["class_of_vehicles"].append({
-                "cov": cov.strip(),
-                "issue": clean(issue),
-            })
+            m.group(1), re.I|re.S
+        ):
+            out["class_of_vehicles"].append({"cov":cov.strip(), "issue":clean(issue)})
 
-    # Validity
-    val_matches = re.findall(
+    vals = re.findall(
         r'<label[^>]*class="text-success"[^>]*>\s*(Transport|Non[\s-]?Transport)\s*:?\s*</label>.*?'
         r'<div[^>]*class="col-md-6 text-center"[^>]*>\s*([^<]+?)\s*</div>',
-        html, re.I | re.S
+        html, re.I|re.S
     )
-    if val_matches:
-        out["validity"] = " | ".join(f"{t}: {clean(v)}" for t, v in val_matches)
+    if vals:
+        out["validity"] = " | ".join(f"{t}: {clean(v)}" for t,v in vals)
 
-    # Badge numbers
-    m = re.search(r'Badge No\s*:.*?</label>(.*?)</fieldset>', html, re.I | re.S)
+    m = re.search(r'Badge No\s*:.*?</label>(.*?)</fieldset>', html, re.I|re.S)
     if m:
-        badges = re.findall(
+        for _, b in re.findall(
             r'<div[^>]*class="col-md-6 text-center"[^>]*>\s*(\d+)\s*\)\s*([^<\s]+)\s*</div>',
-            m.group(1), re.I | re.S
-        )
-        for _, b in badges:
+            m.group(1), re.I|re.S
+        ):
             out["badge_numbers"].append(b.strip())
 
-    # Photo / signature
     m = re.search(r'name="imgHid"\s+value="([^"]+)"', html, re.I)
     if m:
         v = m.group(1).replace("&amp;", "&").strip()
         if v.startswith("data:image"): out["photo"] = v
-
     m = re.search(r'name="sigHid"\s+value="([^"]+)"', html, re.I)
     if m:
         v = m.group(1).replace("&amp;", "&").strip()
@@ -360,23 +328,18 @@ def parse_dl(html: str) -> dict:
 
     return out
 
-
 # ============================================================
-#  Core: start session (fetch captcha)
+#  Core: start & submit
 # ============================================================
 def start_session(dlno, dob, state):
     state_code = STATE_CODES.get(state, state[:2].upper())
-
     sid = uuid.uuid4().hex
     sid_dir(sid)
 
-    # 1-3) state selection
     req(sid, BASE + "stateSelection.do")
-    req(sid, BASE + "stateSelectBean.do",
-        {"stName": state_code}, BASE + "stateSelection.do")
+    req(sid, BASE + "stateSelectBean.do", {"stName": state_code}, BASE + "stateSelection.do")
     req(sid, BASE + "dlServicesDet.do", None, BASE + "stateSelectBean.do")
 
-    # 4) envaction.do → token1
     r = req(sid, BASE + "envaction.do", None, BASE + "dlServicesDet.do")
     if r["http"] != 200:
         raise RuntimeError(f"envaction.do HTTP {r['http']}")
@@ -387,12 +350,10 @@ def start_session(dlno, dob, state):
     token = extract_token(r["text"])
     if not token:
         raise RuntimeError("token नहीं मिला")
-
     if "Application for Services on Driving Licence" not in r["text"]:
         raise RuntimeError("envaction.do returned landing page — state selection fail")
 
-    # 5) captcha image
-    cap = req(sid, BASE + "jsp/common/captchaimage.jsp?_=" + str(int(time.time() * 1000)),
+    cap = req(sid, BASE + "jsp/common/captchaimage.jsp?_=" + str(int(time.time()*1000)),
               None, BASE + "envaction.do")
     if cap["http"] != 200 or len(cap["body"]) < 100:
         raise RuntimeError("captcha fetch failed")
@@ -401,47 +362,40 @@ def start_session(dlno, dob, state):
         "dlno": dlno, "dob": dob, "state": state,
         "state_code": state_code, "token1": token, "ts": time.time(),
     })
-
     return sid, cap["body"], token
 
 
-# ============================================================
-#  Core: submit with captcha (manually typed or OCR'd)
-# ============================================================
 def submit_with_captcha(sid, captcha):
     s = state_load(sid)
     if not s: raise RuntimeError("state नहीं मिला")
     if time.time() - s.get("ts", 0) > 300:
         raise RuntimeError("session expire — नया कैप्चा लें")
 
-    dlno    = s["dlno"]
-    dob     = s["dob"]
-    state   = s["state"]
-    token1  = s["token1"]
+    dlno, dob, state, token1 = s["dlno"], s["dob"], s["state"], s["token1"]
 
-    # 1) AJAX verify
+    # AJAX verify — urlencoded body
+    ajax_body = urlencode({"dlno": dlno, "dob": dob, "captchaByApplicant": captcha})
     ajax = req(sid, BASE + "getLastEndorsedRtoDLserReq.do?",
-               f"dlno={dlno}&dob={dob}&captchaByApplicant={captcha}",
-               BASE + "envaction.do", ajax=True)
+               ajax_body, BASE + "envaction.do", ajax=True)
 
-    with open(sid_file(sid, "ajax.txt"), "w") as f:
-        f.write(ajax["text"])
+    with open(sid_file(sid, "ajax.txt"), "w", encoding="utf-8", errors="ignore") as f:
+        f.write(ajax["text"] or "")
 
     parsed = parse_ajax(ajax["text"])
     if not parsed["ok"]:
-        raise RuntimeError(f"कैप्चा गलत (status: {parsed.get('status', 'INVALID')})")
+        raw_preview = parsed.get("raw", "")[:300]
+        raise RuntimeError(
+            f"कैप्चा गलत (status: {parsed.get('status','INVALID')}) | raw: {raw_preview}"
+        )
 
-    dl_name  = parsed["name"]
-    dl_state = parsed["state"]
-    dl_rto   = parsed["rto"]
+    dl_name, dl_state, dl_rto = parsed["name"], parsed["state"], parsed["rto"]
 
-    # 2) Multipart POST envaction.do — duplicates allowed via pairs
     pairs = [
         ("capToDisp", ""),
         ("captchaByApplicant", ""),
         ("dlno", dlno),
         ("dob", dob),
-        ("entCaptha", captcha),                          # 1st
+        ("entCaptha", captcha),
         ("PrivacyPolicyTermsofService", "true"),
         ("__checkbox_PrivacyPolicyTermsofService", "true"),
         ("dispDLDet", "Select"),
@@ -453,7 +407,7 @@ def submit_with_captcha(sid, captcha):
         ("token", token1),
         ("reset", "formsubmit"),
         ("s4msg", ""),
-        ("entCaptha", ""),                                # 2nd (empty)
+        ("entCaptha", ""),
         ("rtoNameSelPreAppl", ""),
         ("dlno1", ""),
         ("applnotransreq", ""),
@@ -474,7 +428,7 @@ def submit_with_captcha(sid, captcha):
     post = req_multipart_pairs(sid, BASE + "envaction.do", pairs, BASE + "envaction.do")
 
     with open(sid_file(sid, "last_response.html"), "w", encoding="utf-8", errors="ignore") as f:
-        f.write(post["text"])
+        f.write(post["text"] or "")
     with open(sid_file(sid, "submit_http.txt"), "w") as f:
         f.write(str(post["http"]))
     with open(sid_file(sid, "sent_body.txt"), "w", encoding="utf-8", errors="ignore") as f:
@@ -483,7 +437,6 @@ def submit_with_captcha(sid, captcha):
     if post["http"] != 200:
         raise RuntimeError(f"envaction POST HTTP {post['http']}")
 
-    # 3) Parse details
     if is_dl_page(post["text"]):
         details = parse_dl(post["text"])
         details["success"] = True
@@ -491,10 +444,8 @@ def submit_with_captcha(sid, captcha):
         details["dlno"] = dlno
         return details
 
-    # 4) Fail — detect error
     title = page_title(post["text"])
     clean = clean_html_for_matching(post["text"])
-
     for pat in [r"Incorrect captcha", r"Invalid Captcha", r"Please enter captcha"]:
         if re.search(pat, clean, re.I):
             raise RuntimeError("Server ने कैप्चा invalid बताया — नया कैप्चा लें")
@@ -503,8 +454,7 @@ def submit_with_captcha(sid, captcha):
             raise RuntimeError("इस DL का record नहीं मिला")
 
     preview = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", clean))[:250]
-    raise RuntimeError(f"DL details नहीं मिलीं (title: {title})। Preview: {preview} | Debug: ?action=debug&sid={sid}")
-
+    raise RuntimeError(f"DL details नहीं मिलीं (title: {title})। Preview: {preview}")
 
 # ============================================================
 #  Routes
@@ -517,8 +467,8 @@ def index():
 @app.route("/api/start", methods=["POST"])
 def api_start():
     data = request.get_json(silent=True) or request.form
-    dlno  = (data.get("dlno") or "").strip().upper()
-    dob   = (data.get("dob") or "").strip()
+    dlno = (data.get("dlno") or "").strip().upper()
+    dob  = (data.get("dob") or "").strip()
     state = (data.get("state") or "Bihar").strip()
     use_ocr = str(data.get("use_ocr") or "1") == "1"
 
@@ -534,7 +484,6 @@ def api_start():
 
     b64 = base64.b64encode(captcha_bytes).decode()
 
-    # अगर OCR enabled है → auto-solve try करो
     ocr_text = ""
     if use_ocr and OCR_OK:
         try:
@@ -545,9 +494,7 @@ def api_start():
             ocr_text = ""
 
     return jsonify({
-        "success": True,
-        "sid": sid,
-        "captcha": b64,
+        "success": True, "sid": sid, "captcha": b64,
         "token": token[:8] + "…",
         "ocr_text": ocr_text,
         "ocr_available": OCR_OK and use_ocr,
@@ -557,26 +504,24 @@ def api_start():
 @app.route("/api/submit", methods=["POST"])
 def api_submit():
     data = request.get_json(silent=True) or request.form
-    sid     = re.sub(r"[^a-f0-9]", "", (data.get("sid") or "").strip())
+    sid = re.sub(r"[^a-f0-9]", "", (data.get("sid") or "").strip())
     captcha = re.sub(r"[^A-Za-z0-9]", "", (data.get("captcha") or "").strip())
 
     if not sid or not os.path.isdir(sid_dir(sid)):
-        return jsonify({"success": False, "error": "session गायब — नया कैप्चा लें"}), 400
+        return jsonify({"success": False, "error": "session गायब"}), 400
     if not captcha:
         return jsonify({"success": False, "error": "कैप्चा खाली है"}), 400
     if not (3 <= len(captcha) <= 10):
         return jsonify({"success": False, "error": "कैप्चा की लंबाई गलत"}), 400
 
     try:
-        result = submit_with_captcha(sid, captcha)
-        return jsonify(result)
+        return jsonify(submit_with_captcha(sid, captcha))
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
 
 @app.route("/api/retry_ocr", methods=["POST"])
 def api_retry_ocr():
-    """कैप्चा image को फिर से OCR करो (naya image हो तो SID बदलना पड़ेगा)"""
     data = request.get_json(silent=True) or request.form
     b64 = data.get("captcha_b64") or ""
     if not b64:
@@ -586,8 +531,7 @@ def api_retry_ocr():
     try:
         raw = base64.b64decode(b64)
         txt = OCR.classification(raw) or ""
-        clean = re.sub(r"[^A-Za-z0-9]", "", txt)
-        return jsonify({"success": True, "text": clean})
+        return jsonify({"success": True, "text": re.sub(r"[^A-Za-z0-9]", "", txt)})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)})
 
@@ -596,21 +540,16 @@ def api_retry_ocr():
 def api_debug():
     sid = re.sub(r"[^a-f0-9]", "", (request.args.get("sid") or "").strip())
     if not sid or not os.path.isdir(sid_dir(sid)):
-        return Response("?sid=<sid> ज़रूरी है या session गायब", mimetype="text/plain; charset=utf-8")
-
+        return Response("?sid=<sid> ज़रूरी है", mimetype="text/plain; charset=utf-8")
     out = [f"=== SID: {sid} ===\n"]
-    for f in ["state.json", "form.html", "ajax.txt", "submit_http.txt",
-              "last_response.html", "sent_body.txt"]:
+    for f in ["state.json","form.html","ajax.txt","submit_http.txt",
+              "last_response.html","sent_body.txt"]:
         p = sid_file(sid, f)
         out.append(f"========== {f} ==========\n")
         if os.path.isfile(p):
-            with open(p, "rb") as fh:
-                c = fh.read()
+            with open(p, "rb") as fh: c = fh.read()
             out.append(f"(len={len(c)})\n")
-            try:
-                out.append(c.decode("utf-8", "ignore")[:6000] + "\n\n")
-            except Exception:
-                out.append("(binary)\n\n")
+            out.append(c.decode("utf-8", "ignore")[:6000] + "\n\n")
         else:
             out.append("(missing)\n\n")
     return Response("".join(out), mimetype="text/plain; charset=utf-8")
@@ -619,7 +558,8 @@ def api_debug():
 @app.route("/healthz")
 def healthz():
     cleanup_old()
-    return jsonify({"ok": True, "ocr_ok": OCR_OK, "time": datetime.utcnow().isoformat() + "Z"})
+    return jsonify({"ok": True, "ocr_ok": OCR_OK,
+                    "time": datetime.utcnow().isoformat() + "Z"})
 
 
 if __name__ == "__main__":
