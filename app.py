@@ -1,20 +1,35 @@
 # ============================================================
-#  app.py — Sarathi DL Fetcher (MANUAL CAPTCHA)
-#  कोई OCR नहीं — user खुद कैप्चा टाइप करता है
-#  Render-ready, Flask
+#  app.py — Sarathi DL Details Fetcher
+#  FREE OCR (ddddocr) + Manual fallback + Flask
+#  Render-ready
 # ============================================================
 
 import os
 import re
 import time
+import json
 import uuid
+import base64
+import random
+import string
+import secrets
 import threading
 import traceback
 from datetime import datetime
 
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, Response
 import requests
-from bs4 import BeautifulSoup
+
+# ---------- FREE OCR ----------
+try:
+    import ddddocr
+    OCR = ddddocr.DdddOcr(show_ad=False)
+    OCR_OK = True
+    print("[*] ddddocr loaded", flush=True)
+except Exception as e:
+    print(f"[!] ddddocr load failed: {e}", flush=True)
+    OCR = None
+    OCR_OK = False
 
 app = Flask(__name__)
 app.config["JSON_AS_ASCII"] = False
@@ -27,15 +42,6 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
       "AppleWebKit/537.36 (KHTML, like Gecko) "
       "Chrome/153.0.0.0 Safari/537.36")
 
-HEADERS = {
-    "User-Agent": UA,
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Cache-Control": "no-cache",
-    "Origin": "https://sarathi.parivahan.gov.in",
-    "Upgrade-Insecure-Requests": "1",
-}
-
 STATE_CODES = {
     "Maharashtra": "MH", "Bihar": "BR", "Delhi": "DL",
     "Karnataka": "KA", "Tamil Nadu": "TN", "Uttar Pradesh": "UP",
@@ -46,276 +52,415 @@ STATE_CODES = {
     "Uttarakhand": "UK", "Himachal Pradesh": "HP", "Goa": "GA",
 }
 
-# ============================================================
-#  Session store (in-memory, 5-min TTL)
-# ============================================================
-SESSIONS = {}          # sid -> {"session": requests.Session, "token": str, "params": dict, "ts": float}
-SESSIONS_LOCK = threading.Lock()
-SESSION_TTL = 300      # 5 minutes
-
-
-def _cleanup_sessions():
-    now = time.time()
-    with SESSIONS_LOCK:
-        dead = [sid for sid, d in SESSIONS.items() if now - d["ts"] > SESSION_TTL]
-        for sid in dead:
-            del SESSIONS[sid]
-
-
-def _save_session(sid, req_session, token, params):
-    with SESSIONS_LOCK:
-        SESSIONS[sid] = {
-            "session": req_session,
-            "token": token,
-            "params": params,
-            "ts": time.time(),
-        }
-
-
-def _get_session(sid):
-    with SESSIONS_LOCK:
-        d = SESSIONS.get(sid)
-        if not d:
-            return None
-        if time.time() - d["ts"] > SESSION_TTL:
-            del SESSIONS[sid]
-            return None
-        return d
-
-
-def _del_session(sid):
-    with SESSIONS_LOCK:
-        SESSIONS.pop(sid, None)
-
+TMP = "/tmp"  # Render Linux
+if not os.path.isdir(TMP):
+    TMP = os.environ.get("TEMP", ".")
 
 # ============================================================
-#  Helper: session / token
+#  File-based session store
 # ============================================================
-def new_http_session() -> requests.Session:
-    s = requests.Session()
-    s.headers.update(HEADERS)
-    return s
+def sid_dir(sid: str) -> str:
+    sid = re.sub(r"[^a-f0-9]", "", sid) or "default"
+    d = os.path.join(TMP, f"sarathi_sid_{sid}")
+    os.makedirs(d, exist_ok=True)
+    return d
 
+def sid_jar(sid):      return os.path.join(sid_dir(sid), "jar.txt")
+def sid_state(sid):    return os.path.join(sid_dir(sid), "state.json")
+def sid_file(sid, n):  return os.path.join(sid_dir(sid), n)
 
-def extract_token(html: str):
+def state_load(sid):
+    p = sid_state(sid)
+    if not os.path.isfile(p): return {}
     try:
-        soup = BeautifulSoup(html, "html.parser")
-        inp = soup.find("input", {"name": "token"})
-        if inp and inp.get("value"):
-            return inp["value"].strip()
+        with open(p) as f: return json.load(f)
+    except Exception: return {}
+
+def state_save(sid, s):
+    with open(sid_state(sid), "w") as f: json.dump(s, f)
+
+def cleanup_old():
+    try:
+        now = time.time()
+        for d in os.listdir(TMP):
+            if not d.startswith("sarathi_sid_"): continue
+            p = os.path.join(TMP, d)
+            if not os.path.isdir(p): continue
+            if now - os.path.getmtime(p) > 1800:
+                for f in os.listdir(p):
+                    try: os.remove(os.path.join(p, f))
+                    except Exception: pass
+                try: os.rmdir(p)
+                except Exception: pass
     except Exception:
         pass
-    for pat in (
-        r'name=["\']token["\'][^>]*value=["\']([^"\']+)["\']',
-        r'value=["\']([^"\']+)["\'][^>]*name=["\']token["\']',
-    ):
-        m = re.search(pat, html, re.I)
-        if m:
-            return m.group(1).strip()
+
+# ============================================================
+#  Chrome-like boundary
+# ============================================================
+def chrome_boundary():
+    chars = string.ascii_letters + string.digits
+    return "----WebKitFormBoundary" + "".join(random.choices(chars, k=16))
+
+# ============================================================
+#  HTTP helpers
+# ============================================================
+def req(sid, url, post=None, referer=None, ajax=False):
+    jar = sid_jar(sid)
+    headers = {
+        "User-Agent": UA,
+        "Accept": (
+            "application/json, text/javascript, */*; q=0.01" if ajax
+            else "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+        "Origin": "https://sarathi.parivahan.gov.in",
+        "Upgrade-Insecure-Requests": "1",
+    }
+    if referer: headers["Referer"] = referer
+    if ajax:    headers["X-Requested-With"] = "XMLHttpRequest"
+
+    try:
+        if post is None:
+            r = requests.get(url, headers=headers, timeout=45,
+                             verify=True, allow_redirects=True)
+        else:
+            if ajax:
+                headers["Content-Type"] = "application/x-www-form-urlencoded; charset=UTF-8"
+                r = requests.post(url, headers=headers, data=post, timeout=45,
+                                  verify=True, allow_redirects=True)
+            else:
+                r = requests.post(url, headers=headers,
+                                  data=post if isinstance(post, (bytes, str)) else
+                                       {k: v for k, v in post.items()},
+                                  timeout=45, verify=True, allow_redirects=True)
+        return {"body": r.content, "text": r.text, "http": r.status_code, "err": ""}
+    except Exception as e:
+        return {"body": b"", "text": "", "http": 0, "err": str(e)}
+
+
+def req_multipart_pairs(sid, url, pairs, referer=None):
+    """
+    pairs: list of (name, value) tuples — duplicates allowed, order preserved.
+    Uses requests, which handles cookies via session.
+    """
+    jar = sid_jar(sid)
+    boundary = chrome_boundary()
+
+    parts = []
+    for name, value in pairs:
+        parts.append(f"--{boundary}\r\n")
+        parts.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n')
+        parts.append(str(value))
+        parts.append("\r\n")
+    parts.append(f"--{boundary}--\r\n")
+    body = "".join(parts)
+
+    headers = {
+        "User-Agent": UA,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Cache-Control": "no-cache",
+        "Origin": "https://sarathi.parivahan.gov.in",
+        "Upgrade-Insecure-Requests": "1",
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+    }
+    if referer: headers["Referer"] = referer
+
+    try:
+        r = requests.post(url, headers=headers, data=body.encode("utf-8"),
+                          timeout=60, verify=True, allow_redirects=True)
+        return {"body": r.content, "text": r.text, "http": r.status_code,
+                "err": "", "sent_body": body}
+    except Exception as e:
+        return {"body": b"", "text": "", "http": 0, "err": str(e), "sent_body": body}
+
+
+# ============================================================
+#  Parse helpers
+# ============================================================
+def extract_token(html: str):
+    m = re.search(r'<input[^>]*name=["\']token["\'][^>]*value=["\']([^"\']+)', html, re.I)
+    if m: return m.group(1)
+    m = re.search(r'<input[^>]*value=["\']([^"\']+)["\'][^>]*name=["\']token["\']', html, re.I)
+    if m: return m.group(1)
     return None
 
 
-def select_state(session: requests.Session, state_code: str) -> bool:
-    """stateSelectBean.do + stName=BR (या जो भी code)"""
+def page_title(html: str) -> str:
+    m = re.search(r'<title>([^<]*)</title>', html, re.I)
+    return m.group(1).strip() if m else "unknown"
+
+
+def parse_ajax(body: str):
+    body = (body or "").strip()
     try:
-        session.get(BASE + "stateSelection.do", timeout=20)
-        session.post(
-            BASE + "stateSelectBean.do",
-            data={"stName": state_code},
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Referer": BASE + "stateSelection.do",
-                "Origin": "https://sarathi.parivahan.gov.in",
-            },
-            timeout=20,
-            allow_redirects=True,
-        )
-        return "STATEID" in session.cookies
-    except Exception as e:
-        print(f"[!] select_state: {e}", flush=True)
-        return False
-
-
-# ============================================================
-#  STRICT: असली DL page है या नहीं
-# ============================================================
-def is_dl_page(html: str, dlno: str = "") -> bool:
-    if not html:
-        return False
-    # hidden form page पहचानें
-    if re.search(
-        r'id=["\']dlSerReqPersDet["\'][^>]*style=["\'][^"\']*display\s*:\s*none',
-        html, re.I
-    ):
-        return False
-
-    soup = BeautifulSoup(html, "html.parser")
-    text = soup.get_text(" ", strip=True)
-
-    if "Confirmed that the above Driving Licence details are mine" in text:
-        if dlno.upper() in html.upper() or not dlno:
-            return True
-
-    if "Class of Vehicles" in text and "Validity Period" in text and "dlSerReqPersDet" in html:
-        return True
-
-    return False
-
-
-def detect_error(html: str) -> str:
-    low = html.lower()
-    if "invalid captcha" in low:
-        return "captcha_invalid"
-    if "please enter captcha" in low:
-        return "captcha_empty"
-    if "no record" in low or "no data found" in low:
-        return "no_record"
-    if "session expired" in low:
-        return "session_expired"
-    if "invalid dl" in low or "not valid" in low:
-        return "invalid_dl"
-    return "unknown"
-
-
-def preview(html: str, n: int = 300) -> str:
-    if not html:
-        return ""
-    try:
-        soup = BeautifulSoup(html, "html.parser")
-        for sel in [".error", ".errormessage", ".alert", "#errormsg",
-                    "div[class*='error']", "span[class*='error']"]:
-            for el in soup.select(sel):
-                t = el.get_text(" ", strip=True)
-                if t:
-                    return t[:n]
-        body = soup.find("body")
-        if body:
-            return re.sub(r"\s+", " ", body.get_text(" ", strip=True))[:n]
+        j = json.loads(body)
     except Exception:
-        pass
-    return re.sub(r"<[^>]+>", " ", html)[:n]
-
-
-# ============================================================
-#  Parse result
-# ============================================================
-def _norm(s): return re.sub(r"\s+", " ", (s or "").strip()).rstrip(":").lower()
-
-
-def _val(root, label):
-    lab = _norm(label)
-    for cell in root.find_all(["td", "th"]):
-        if _norm(cell.get_text(" ", strip=True)) == lab:
-            nxt = cell.find_next_sibling("td")
-            if nxt:
-                v = re.sub(r"\s+", " ", nxt.get_text(" ", strip=True))
-                if v:
-                    return v
-    for cell in root.find_all(["td", "th"]):
-        txt = _norm(cell.get_text(" ", strip=True))
-        if txt.startswith(lab) and len(txt) < len(lab) + 20:
-            nxt = cell.find_next_sibling("td")
-            if nxt:
-                v = re.sub(r"\s+", " ", nxt.get_text(" ", strip=True))
-                if v and _norm(v) != lab:
-                    return v
-    return ""
-
-
-def _abs(u):
-    if not u: return ""
-    if u.startswith("data:"): return u
-    if u.startswith("http"): return u
-    if u.startswith("/"): return "https://sarathi.parivahan.gov.in" + u
-    return BASE + u.lstrip("./")
-
-
-def _is_logo(src):
-    if not src: return True
-    low = src.lower()
-    for b in ("/images/logo/", "ministry-nic", "parivahan-logo", "digital_logo",
-              "nhai", "emblem", "footer", ".ico", ".svg",
-              "nophoto", "nosignature", "refresh", "calendar"):
-        if b in low:
-            return True
-    return False
-
-
-def parse_dl(html, dlno=""):
-    soup = BeautifulSoup(html, "html.parser")
-    root = soup.find(id="dlSerReqPersDet") or soup
-
-    photo, sign = "", ""
-    for img in root.find_all("img"):
-        src = img.get("src", "") or ""
-        if _is_logo(src):
-            continue
-        if src.startswith("data:image"):
-            if not photo: photo = src
-            elif not sign: sign = src
-        else:
-            l = src.lower()
-            if "photo" in l and not photo: photo = src
-            elif "sign" in l and not sign: sign = src
-            elif not photo: photo = src
-            elif not sign: sign = src
-
+        return {"ok": False, "status": "PARSE_ERROR", "raw": body[:200]}
+    if not isinstance(j, list) or len(j) < 3:
+        return {"ok": False, "status": "PARSE_ERROR", "raw": body[:200]}
+    status = j[1] if len(j) > 1 else ""
+    if status != "OK":
+        return {"ok": False, "status": str(status), "raw": body[:200]}
+    combined = str(j[2]) if len(j) > 2 else ""
+    state, name = "", ""
+    if "@" in combined:
+        state, name = combined.split("@", 1)
+    else:
+        name = combined
     return {
-        "success":             True,
-        "dlno":                dlno,
-        "name":                _val(root, "Name"),
-        "father_name":         _val(root, "S/W/D of"),
-        "dob":                 _val(root, "Date of Birth"),
-        "blood_group":         _val(root, "Blood Group"),
-        "category":            _val(root, "Category"),
-        "present_address":     _val(root, "Present Address") or _val(root, "Address"),
-        "last_endorsed_state": _val(root, "State"),
-        "last_endorsed_rto":   _val(root, "RTO"),
-        "class_of_vehicles":   _val(root, "Class of Vehicle") or _val(root, "COV"),
-        "validity":            _val(root, "Validity"),
-        "badge_numbers":       _val(root, "Badge"),
-        "photo":               _abs(photo),
-        "signature":           _abs(sign),
+        "ok": True,
+        "state": state.strip(),
+        "name": name.strip(),
+        "rto": str(j[3]).strip() if len(j) > 3 else "",
+        "raw": body[:200],
     }
 
 
+def clean_html_for_matching(html: str) -> str:
+    """HTML comments और <script> blocks हटाओ (regex false positive से बचने के लिए)"""
+    html = re.sub(r"<!--.*?-->", "", html, flags=re.S)
+    html = re.sub(r"<script\b[^>]*>.*?</script>", "", html, flags=re.S | re.I)
+    return html
+
+
+def is_dl_page(html: str) -> bool:
+    clean = clean_html_for_matching(html)
+
+    # 1) photo / signature base64
+    if re.search(r'name="imgHid"\s+value="data:image', clean, re.I): return True
+    if re.search(r'name="sigHid"\s+value="data:image', clean, re.I): return True
+
+    # 2) Name non-empty
+    m = re.search(
+        r'<td[^>]*text-success[^>]*>\s*Name\s*:\s*</td>\s*<td[^>]*>\s*([^<\s][^<]*?)</td>',
+        clean, re.I
+    )
+    if m:
+        name = m.group(1).strip()
+        if len(name) > 2 and "text-left" not in name.lower():
+            return True
+
+    # 3) Father's name non-empty
+    m = re.search(
+        r'<td[^>]*text-success[^>]*>\s*Father\'?s?\s*Name\s*:\s*</td>\s*<td[^>]*>\s*([^<\s][^<]*?)</td>',
+        clean, re.I
+    )
+    if m:
+        v = m.group(1).strip()
+        if len(v) > 2 and "text-left" not in v.lower():
+            return True
+
+    return False
+
+
+def parse_dl(html: str) -> dict:
+    # ✅ Comments + scripts हटाओ
+    html = clean_html_for_matching(html)
+
+    out = {
+        "dlno": "", "name": "", "father_name": "", "dob": "",
+        "blood_group": "", "category": "", "present_address": "",
+        "last_endorsed_state": "", "last_endorsed_rto": "",
+        "class_of_vehicles": [], "validity": "", "badge_numbers": [],
+        "photo": "", "signature": "",
+    }
+
+    def find(pattern, src=None, flags=re.I | re.S):
+        m = re.search(pattern, src if src is not None else html, flags)
+        return m.group(1).strip() if m else ""
+
+    def clean(s):
+        return re.sub(r"\s+", " ", s).strip()
+
+    out["name"] = clean(find(
+        r'<td[^>]*text-success[^>]*>\s*Name\s*:\s*</td>\s*<td[^>]*>\s*([^<\s][^<]*?)\s*</td>'
+    ))
+    out["father_name"] = clean(find(
+        r'<td[^>]*text-success[^>]*>\s*Father\'?s?\s*Name\s*:\s*</td>\s*<td[^>]*>\s*([^<\s][^<]*?)\s*</td>'
+    ))
+    out["dob"] = clean(find(
+        r'<td[^>]*text-success[^>]*>\s*Date of Birth\s*:\s*</td>\s*<td[^>]*>\s*([^<\s][^<]*?)\s*</td>'
+    ))
+    out["blood_group"] = clean(find(
+        r'<td[^>]*text-success[^>]*>\s*Blood Group\s*:\s*</td>\s*<td[^>]*>\s*([^<\s][^<]*?)\s*</td>'
+    ))
+    out["category"] = clean(find(
+        r'<td[^>]*text-success[^>]*>\s*Category[^<:]*:\s*</td>\s*<td[^>]*>\s*([^<\s][^<]*?)\s*</td>'
+    ))
+
+    # Present Address (multi-line)
+    m = re.search(
+        r'Present Address\s*:\s*</td>\s*<td[^>]*>([^<]*)</td>(.*?)</table>',
+        html, re.I | re.S
+    )
+    if m:
+        addr = clean(m.group(1))
+        lines = re.findall(r'<td[^>]*class="text-left"[^>]*>([^<]+)</td>', m.group(2), re.I)
+        for line in lines:
+            line = clean(line)
+            if line:
+                addr = (addr + ", " + line) if addr else line
+        out["present_address"] = addr
+
+    # ✅ State — visible <b class="text-success"> State- </b>
+    out["last_endorsed_state"] = clean(find(
+        r'<b[^>]*class="[^"]*text-success[^"]*"[^>]*>\s*State\s*-\s*</b>\s*([^<\s][^<]*)'
+    ))
+
+    # ✅ RTO — visible <b class="text-success"> RTO - </b>
+    out["last_endorsed_rto"] = clean(find(
+        r'<b[^>]*class="[^"]*text-success[^"]*"[^>]*>\s*RTO\s*-\s*</b>\s*([^<\s][^<]*)'
+    ))
+
+    # Class of vehicles
+    m = re.search(r'Class of Vehicles\s*:.*?<table[^>]*>(.*?)</table>', html, re.I | re.S)
+    if m:
+        rows = re.findall(
+            r'<tr>\s*<td[^>]*>([A-Z0-9\-]+)</td>.*?<b class="control-label">\s*([^<]+?)</b>',
+            m.group(1), re.I | re.S
+        )
+        for cov, issue in rows:
+            out["class_of_vehicles"].append({
+                "cov": cov.strip(),
+                "issue": clean(issue),
+            })
+
+    # Validity
+    val_matches = re.findall(
+        r'<label[^>]*class="text-success"[^>]*>\s*(Transport|Non[\s-]?Transport)\s*:?\s*</label>.*?'
+        r'<div[^>]*class="col-md-6 text-center"[^>]*>\s*([^<]+?)\s*</div>',
+        html, re.I | re.S
+    )
+    if val_matches:
+        out["validity"] = " | ".join(f"{t}: {clean(v)}" for t, v in val_matches)
+
+    # Badge numbers
+    m = re.search(r'Badge No\s*:.*?</label>(.*?)</fieldset>', html, re.I | re.S)
+    if m:
+        badges = re.findall(
+            r'<div[^>]*class="col-md-6 text-center"[^>]*>\s*(\d+)\s*\)\s*([^<\s]+)\s*</div>',
+            m.group(1), re.I | re.S
+        )
+        for _, b in badges:
+            out["badge_numbers"].append(b.strip())
+
+    # Photo / signature
+    m = re.search(r'name="imgHid"\s+value="([^"]+)"', html, re.I)
+    if m:
+        v = m.group(1).replace("&amp;", "&").strip()
+        if v.startswith("data:image"): out["photo"] = v
+
+    m = re.search(r'name="sigHid"\s+value="([^"]+)"', html, re.I)
+    if m:
+        v = m.group(1).replace("&amp;", "&").strip()
+        if v.startswith("data:image"): out["signature"] = v
+
+    return out
+
+
 # ============================================================
-#  Multipart fields builder
+#  Core: start session (fetch captcha)
 # ============================================================
-def build_multipart_fields(token, captcha, dlno, dob, state, rto_code,
-                           st_name, rto_name, state_iso):
-    return [
-        ("serday", "28"),
-        ("sermth", "9"),
-        ("seryr", str(datetime.utcnow().year)),
-        ("pincodeForIDPStateOfDL", ""),
-        ("rtopinMappingReqd", ""),
-        ("st_Cd_", state_iso),
+def start_session(dlno, dob, state):
+    state_code = STATE_CODES.get(state, state[:2].upper())
+
+    sid = uuid.uuid4().hex
+    sid_dir(sid)
+
+    # 1-3) state selection
+    req(sid, BASE + "stateSelection.do")
+    req(sid, BASE + "stateSelectBean.do",
+        {"stName": state_code}, BASE + "stateSelection.do")
+    req(sid, BASE + "dlServicesDet.do", None, BASE + "stateSelectBean.do")
+
+    # 4) envaction.do → token1
+    r = req(sid, BASE + "envaction.do", None, BASE + "dlServicesDet.do")
+    if r["http"] != 200:
+        raise RuntimeError(f"envaction.do HTTP {r['http']}")
+
+    with open(sid_file(sid, "form.html"), "wb") as f:
+        f.write(r["body"])
+
+    token = extract_token(r["text"])
+    if not token:
+        raise RuntimeError("token नहीं मिला")
+
+    if "Application for Services on Driving Licence" not in r["text"]:
+        raise RuntimeError("envaction.do returned landing page — state selection fail")
+
+    # 5) captcha image
+    cap = req(sid, BASE + "jsp/common/captchaimage.jsp?_=" + str(int(time.time() * 1000)),
+              None, BASE + "envaction.do")
+    if cap["http"] != 200 or len(cap["body"]) < 100:
+        raise RuntimeError("captcha fetch failed")
+
+    state_save(sid, {
+        "dlno": dlno, "dob": dob, "state": state,
+        "state_code": state_code, "token1": token, "ts": time.time(),
+    })
+
+    return sid, cap["body"], token
+
+
+# ============================================================
+#  Core: submit with captcha (manually typed or OCR'd)
+# ============================================================
+def submit_with_captcha(sid, captcha):
+    s = state_load(sid)
+    if not s: raise RuntimeError("state नहीं मिला")
+    if time.time() - s.get("ts", 0) > 300:
+        raise RuntimeError("session expire — नया कैप्चा लें")
+
+    dlno    = s["dlno"]
+    dob     = s["dob"]
+    state   = s["state"]
+    token1  = s["token1"]
+
+    # 1) AJAX verify
+    ajax = req(sid, BASE + "getLastEndorsedRtoDLserReq.do?",
+               f"dlno={dlno}&dob={dob}&captchaByApplicant={captcha}",
+               BASE + "envaction.do", ajax=True)
+
+    with open(sid_file(sid, "ajax.txt"), "w") as f:
+        f.write(ajax["text"])
+
+    parsed = parse_ajax(ajax["text"])
+    if not parsed["ok"]:
+        raise RuntimeError(f"कैप्चा गलत (status: {parsed.get('status', 'INVALID')})")
+
+    dl_name  = parsed["name"]
+    dl_state = parsed["state"]
+    dl_rto   = parsed["rto"]
+
+    # 2) Multipart POST envaction.do — duplicates allowed via pairs
+    pairs = [
         ("capToDisp", ""),
         ("captchaByApplicant", ""),
         ("dlno", dlno),
         ("dob", dob),
-        ("entCaptha", captcha),
+        ("entCaptha", captcha),                          # 1st
         ("PrivacyPolicyTermsofService", "true"),
         ("__checkbox_PrivacyPolicyTermsofService", "true"),
         ("dispDLDet", "Select"),
         ("applcatgDLserReq", "General"),
         ("PincodeDLserReq", ""),
         ("stateCodeDLTr", state),
-        ("rtoCodeDLTr", rto_code or "-1"),
-        ("dlconfirm", "Proceed"),
+        ("rtoCodeDLTr", "-1"),
         ("struts.token.name", "token"),
-        ("token", token),
-        ("reset", ""),
+        ("token", token1),
+        ("reset", "formsubmit"),
         ("s4msg", ""),
-        ("entCaptha", captcha),
+        ("entCaptha", ""),                                # 2nd (empty)
         ("rtoNameSelPreAppl", ""),
         ("dlno1", ""),
         ("applnotransreq", ""),
         ("dob1", ""),
-        ("stEndName", st_name),
-        ("rtoEndName", rto_name),
-        ("ApplFullNameDLSReq", ""),
+        ("stEndName", dl_state),
+        ("rtoEndName", dl_rto),
+        ("ApplFullNameDLSReq", dl_name),
         ("isMatch", ""),
         ("firstCap", "true"),
         ("CapPho", ""),
@@ -324,123 +469,41 @@ def build_multipart_fields(token, captcha, dlno, dob, state, rto_code,
         ("scFaceAuthReqAiLib", ""),
         ("faceauthmodel", "https://sarathi.parivahan.gov.in/cdn-sarathi/models"),
         ("videoDevicesDetected", ""),
-        ("umfPresent", "false"),
-        ("FaceAuthReq", "false"),
-        ("StateName", state),
     ]
 
+    post = req_multipart_pairs(sid, BASE + "envaction.do", pairs, BASE + "envaction.do")
 
-# ============================================================
-#  STEP 1: captcha लाओ, session save करो
-# ============================================================
-def start_session(dlno, dob, state, rto_code, st_name, rto_name):
-    _cleanup_sessions()
+    with open(sid_file(sid, "last_response.html"), "w", encoding="utf-8", errors="ignore") as f:
+        f.write(post["text"])
+    with open(sid_file(sid, "submit_http.txt"), "w") as f:
+        f.write(str(post["http"]))
+    with open(sid_file(sid, "sent_body.txt"), "w", encoding="utf-8", errors="ignore") as f:
+        f.write(post.get("sent_body", ""))
 
-    state_iso = STATE_CODES.get(state, state[:2].upper())
-    s = new_http_session()
+    if post["http"] != 200:
+        raise RuntimeError(f"envaction POST HTTP {post['http']}")
 
-    # state select
-    select_state(s, state_iso)
+    # 3) Parse details
+    if is_dl_page(post["text"]):
+        details = parse_dl(post["text"])
+        details["success"] = True
+        details["ocr_engine"] = "manual"
+        details["dlno"] = dlno
+        return details
 
-    # form load → token
-    r = s.get(
-        BASE + "envaction.do",
-        timeout=30,
-        headers={"Referer": BASE + "dlServicesDet.do"},
-    )
-    if r.status_code != 200:
-        raise RuntimeError(f"form HTTP {r.status_code}")
+    # 4) Fail — detect error
+    title = page_title(post["text"])
+    clean = clean_html_for_matching(post["text"])
 
-    token = extract_token(r.text)
-    if not token:
-        raise RuntimeError("token नहीं मिला")
+    for pat in [r"Incorrect captcha", r"Invalid Captcha", r"Please enter captcha"]:
+        if re.search(pat, clean, re.I):
+            raise RuntimeError("Server ने कैप्चा invalid बताया — नया कैप्चा लें")
+    for pat in [r"No record found", r"not available", r"Invalid DL"]:
+        if re.search(pat, clean, re.I):
+            raise RuntimeError("इस DL का record नहीं मिला")
 
-    # captcha image
-    cap = s.get(
-        BASE + "jsp/common/captchaimage.jsp",
-        params={"_": int(time.time() * 1000)},
-        timeout=30,
-        headers={"Referer": BASE + "envaction.do"},
-    )
-    if cap.status_code != 200 or len(cap.content) < 100:
-        raise RuntimeError("captcha fetch failed")
-
-    # session save
-    sid = uuid.uuid4().hex
-    _save_session(sid, s, token, {
-        "dlno": dlno, "dob": dob, "state": state,
-        "rto_code": rto_code, "st_name": st_name, "rto_name": rto_name,
-        "state_iso": state_iso,
-    })
-
-    import base64
-    b64 = base64.b64encode(cap.content).decode()
-    return sid, b64
-
-
-# ============================================================
-#  STEP 2: user-typed captcha के साथ submit
-# ============================================================
-def submit_with_captcha(sid, captcha):
-    d = _get_session(sid)
-    if not d:
-        return {"success": False, "error": "session expired — दोबारा captcha लें"}
-
-    s = d["session"]
-    token = d["token"]
-    p = d["params"]
-
-    fields = build_multipart_fields(
-        token, captcha,
-        p["dlno"], p["dob"], p["state"], p["rto_code"],
-        p["st_name"], p["rto_name"], p["state_iso"],
-    )
-    files = [(name, (None, str(val))) for name, val in fields]
-
-    try:
-        r = s.post(
-            BASE + "envaction.do",
-            files=files,
-            timeout=60,
-            headers={
-                "Referer": BASE + "envaction.do",
-                "Origin": "https://sarathi.parivahan.gov.in",
-            },
-        )
-    except Exception as e:
-        _del_session(sid)
-        return {"success": False, "error": f"network: {e}"}
-
-    # एक बार इस्तेमाल → हटाओ
-    _del_session(sid)
-
-    if is_dl_page(r.text, p["dlno"]):
-        result = parse_dl(r.text, p["dlno"])
-        if not result.get("name") and not result.get("dob"):
-            return {
-                "success": False,
-                "error":   "result page मिला पर fields खाली",
-                "preview": preview(r.text, 500),
-            }
-        return result
-
-    err = detect_error(r.text)
-    msg = {
-        "captcha_invalid":  "कैप्चा गलत था — दोबारा try करें",
-        "captcha_empty":    "कैप्चा खाली था",
-        "no_record":        "इस DL number/DOB का record नहीं मिला",
-        "session_expired":  "session expire — दोबारा captcha लें",
-        "invalid_dl":       "DL number गलत है",
-        "state_not_selected": "state नहीं चुना गया",
-        "unknown":          "असफल — दोबारा try करें",
-    }.get(err, "असफल")
-
-    return {
-        "success": False,
-        "error":   msg,
-        "code":    err,
-        "preview": preview(r.text, 500),
-    }
+    preview = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", clean))[:250]
+    raise RuntimeError(f"DL details नहीं मिलीं (title: {title})। Preview: {preview} | Debug: ?action=debug&sid={sid}")
 
 
 # ============================================================
@@ -454,55 +517,109 @@ def index():
 @app.route("/api/start", methods=["POST"])
 def api_start():
     data = request.get_json(silent=True) or request.form
-    dlno     = (data.get("dlno") or "").strip().upper()
-    dob      = (data.get("dob")  or "").strip()
-    state    = (data.get("state") or "Bihar").strip()
-    rto_code = (data.get("rto_code") or "").strip()
-    st_name  = (data.get("st_name") or state).strip()
-    rto_name = (data.get("rto_name") or "").strip()
+    dlno  = (data.get("dlno") or "").strip().upper()
+    dob   = (data.get("dob") or "").strip()
+    state = (data.get("state") or "Bihar").strip()
+    use_ocr = str(data.get("use_ocr") or "1") == "1"
 
     if not dlno or not dob:
-        return jsonify({"success": False, "error": "dlno और dob ज़रूरी हैं"}), 400
-    if not re.fullmatch(r"\d{2}-\d{2}-\d{4}", dob):
+        return jsonify({"success": False, "error": "DL number और DOB ज़रूरी हैं"}), 400
+    if not re.match(r"^\d{2}-\d{2}-\d{4}$", dob):
         return jsonify({"success": False, "error": "DOB format DD-MM-YYYY"}), 400
 
     try:
-        sid, img_b64 = start_session(dlno, dob, state, rto_code, st_name, rto_name)
-        return jsonify({"success": True, "sid": sid, "captcha": img_b64})
+        sid, captcha_bytes, token = start_session(dlno, dob, state)
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
+
+    b64 = base64.b64encode(captcha_bytes).decode()
+
+    # अगर OCR enabled है → auto-solve try करो
+    ocr_text = ""
+    if use_ocr and OCR_OK:
+        try:
+            ocr_text = OCR.classification(captcha_bytes) or ""
+            ocr_text = re.sub(r"[^A-Za-z0-9]", "", ocr_text)
+        except Exception as e:
+            print(f"[!] OCR error: {e}", flush=True)
+            ocr_text = ""
+
+    return jsonify({
+        "success": True,
+        "sid": sid,
+        "captcha": b64,
+        "token": token[:8] + "…",
+        "ocr_text": ocr_text,
+        "ocr_available": OCR_OK and use_ocr,
+    })
 
 
 @app.route("/api/submit", methods=["POST"])
 def api_submit():
     data = request.get_json(silent=True) or request.form
-    sid     = (data.get("sid") or "").strip()
-    captcha = (data.get("captcha") or "").strip()
+    sid     = re.sub(r"[^a-f0-9]", "", (data.get("sid") or "").strip())
+    captcha = re.sub(r"[^A-Za-z0-9]", "", (data.get("captcha") or "").strip())
 
-    if not sid or not captcha:
-        return jsonify({"success": False, "error": "sid और captcha ज़रूरी हैं"}), 400
-
-    captcha = re.sub(r"[^A-Za-z0-9]", "", captcha)
+    if not sid or not os.path.isdir(sid_dir(sid)):
+        return jsonify({"success": False, "error": "session गायब — नया कैप्चा लें"}), 400
+    if not captcha:
+        return jsonify({"success": False, "error": "कैप्चा खाली है"}), 400
     if not (3 <= len(captcha) <= 10):
-        return jsonify({"success": False, "error": "captcha की लंबाई गलत"}), 400
+        return jsonify({"success": False, "error": "कैप्चा की लंबाई गलत"}), 400
 
-    return jsonify(submit_with_captcha(sid, captcha))
+    try:
+        result = submit_with_captcha(sid, captcha)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route("/api/retry_ocr", methods=["POST"])
+def api_retry_ocr():
+    """कैप्चा image को फिर से OCR करो (naya image हो तो SID बदलना पड़ेगा)"""
+    data = request.get_json(silent=True) or request.form
+    b64 = data.get("captcha_b64") or ""
+    if not b64:
+        return jsonify({"success": False, "error": "captcha_b64 चाहिए"}), 400
+    if not OCR_OK:
+        return jsonify({"success": False, "error": "OCR unavailable"}), 503
+    try:
+        raw = base64.b64decode(b64)
+        txt = OCR.classification(raw) or ""
+        clean = re.sub(r"[^A-Za-z0-9]", "", txt)
+        return jsonify({"success": True, "text": clean})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)})
+
+
+@app.route("/api/debug")
+def api_debug():
+    sid = re.sub(r"[^a-f0-9]", "", (request.args.get("sid") or "").strip())
+    if not sid or not os.path.isdir(sid_dir(sid)):
+        return Response("?sid=<sid> ज़रूरी है या session गायब", mimetype="text/plain; charset=utf-8")
+
+    out = [f"=== SID: {sid} ===\n"]
+    for f in ["state.json", "form.html", "ajax.txt", "submit_http.txt",
+              "last_response.html", "sent_body.txt"]:
+        p = sid_file(sid, f)
+        out.append(f"========== {f} ==========\n")
+        if os.path.isfile(p):
+            with open(p, "rb") as fh:
+                c = fh.read()
+            out.append(f"(len={len(c)})\n")
+            try:
+                out.append(c.decode("utf-8", "ignore")[:6000] + "\n\n")
+            except Exception:
+                out.append("(binary)\n\n")
+        else:
+            out.append("(missing)\n\n")
+    return Response("".join(out), mimetype="text/plain; charset=utf-8")
 
 
 @app.route("/healthz")
 def healthz():
-    _cleanup_sessions()
-    with SESSIONS_LOCK:
-        n = len(SESSIONS)
-    return jsonify({"status": "ok", "active_sessions": n,
-                    "time": datetime.utcnow().isoformat() + "Z"}), 200
-
-
-@app.errorhandler(404)
-def nf(_): return jsonify({"error": "not found"}), 404
-
-@app.errorhandler(500)
-def se(e): return jsonify({"error": "internal error", "detail": str(e)}), 500
+    cleanup_old()
+    return jsonify({"ok": True, "ocr_ok": OCR_OK, "time": datetime.utcnow().isoformat() + "Z"})
 
 
 if __name__ == "__main__":
