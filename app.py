@@ -1,19 +1,18 @@
 # ============================================================
-#  app.py — Sarathi DL Fetcher
-#  Python + Flask + FREE OCR (ddddocr) + photo/sign fix
-#  Render-ready
+#  app.py — Sarathi DL Fetcher (v4 — multipart fix)
+#  FREE OCR (ddddocr) + Flask + Render ready
 # ============================================================
 
 import os
 import re
 import time
-import base64
-import html as html_lib
+import json
 import traceback
 from datetime import datetime
 
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, Response
 import requests
+from bs4 import BeautifulSoup
 
 # ---------- FREE OCR ----------
 try:
@@ -30,37 +29,61 @@ except Exception as e:
 app = Flask(__name__)
 app.config["JSON_AS_ASCII"] = False
 
-BASE = "https://sarathi.parivahan.gov.in/sarathiservice"
+# ============================================================
+#  Constants
+# ============================================================
+BASE = "https://sarathi.parivahan.gov.in/sarathiservice/"
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
       "AppleWebKit/537.36 (KHTML, like Gecko) "
       "Chrome/153.0.0.0 Safari/537.36")
 
-# debug memory
-LAST_HTML = {"envaction": "", "submit": "", "cookies": {}}
+HEADERS = {
+    "User-Agent": UA,
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Cache-Control": "no-cache",
+    "Origin": "https://sarathi.parivahan.gov.in",
+    "Upgrade-Insecure-Requests": "1",
+}
+
+# State code map (State name → 2-letter code)
+STATE_CODES = {
+    "Maharashtra": "MH", "Bihar": "BR", "Delhi": "DL",
+    "Karnataka": "KA", "Tamil Nadu": "TN", "Uttar Pradesh": "UP",
+    "Gujarat": "GJ", "Rajasthan": "RJ", "West Bengal": "WB",
+    "Madhya Pradesh": "MP", "Kerala": "KL", "Punjab": "PB",
+    "Haryana": "HR", "Telangana": "TG", "Andhra Pradesh": "AP",
+    "Odisha": "OD", "Assam": "AS", "Jharkhand": "JH",
+    "Uttarakhand": "UK", "Himachal Pradesh": "HP", "Goa": "GA",
+}
+
+# debug
+LAST_HTML = {"envaction": "", "submit": ""}
 
 
 # ============================================================
-#  Helpers
+#  Session
 # ============================================================
-def clean_text(s: str) -> str:
-    if s is None:
-        return ""
-    s = re.sub(r"<[^>]*>", " ", s)
-    s = html_lib.unescape(s)
-    s = re.sub(r"\s+", " ", s)
-    return s.strip()
+def new_session() -> requests.Session:
+    s = requests.Session()
+    s.headers.update(HEADERS)
+    return s
 
 
-def rx(pattern: str, text: str, flags=re.S | re.I):
-    m = re.search(pattern, text, flags)
-    return clean_text(m.group(1)) if m else None
-
-
+# ============================================================
+#  Token extractor
+# ============================================================
 def extract_token(html: str):
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        inp = soup.find("input", {"name": "token"})
+        if inp and inp.get("value"):
+            return inp["value"].strip()
+    except Exception:
+        pass
     for pat in (
-        r'<input[^>]+name=["\']token["\'][^>]+value=["\']([^"\']+)["\']',
-        r'<input[^>]+value=["\']([^"\']+)["\'][^>]+name=["\']token["\']',
         r'name=["\']token["\'][^>]*value=["\']([^"\']+)["\']',
+        r'value=["\']([^"\']+)["\'][^>]*name=["\']token["\']',
     ):
         m = re.search(pat, html, re.I)
         if m:
@@ -69,480 +92,473 @@ def extract_token(html: str):
 
 
 # ============================================================
-#  Robust image extractor (photo + signature)
+#  STATE SELECTION — सही तरीका (stateSelectBean.do + stName)
 # ============================================================
-def extract_input_value(html: str, name: str):
-    m = re.search(
-        r'<input\b[^>]*\bname\s*=\s*["\']' + re.escape(name) + r'["\'][^>]*>',
-        html, re.S | re.I
-    )
-    if not m:
-        return None
-    tag = m.group(0)
-    vm = re.search(r'\bvalue\s*=\s*["\'](.*?)["\']', tag, re.S | re.I)
-    if not vm:
-        return None
-    v = html_lib.unescape(vm.group(1))
-    mm = re.match(r'^data:image/[^;]+;base64,(.+)$', v, re.S | re.I)
-    if mm:
-        v = mm.group(1)
-    v = re.sub(r"\s+", "", v)
+def select_state(session: requests.Session, state_code: str) -> bool:
+    """
+    Working curl:
+      POST https://sarathi.parivahan.gov.in/sarathiservice/stateSelectBean.do
+      body: stName=BR
+      referer: stateSelection.do
+    """
     try:
-        if v and base64.b64decode(v, validate=True):
-            return v
-    except Exception:
-        pass
-    return None
+        # 1) पहले selector page visit करें → JSESSIONID मिले
+        r = session.get(BASE + "stateSelection.do", timeout=20)
+        if r.status_code != 200:
+            return False
 
+        # 2) POST stateSelectBean.do with stName
+        r2 = session.post(
+            BASE + "stateSelectBean.do",
+            data={"stName": state_code},
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Referer": BASE + "stateSelection.do",
+                "Origin": "https://sarathi.parivahan.gov.in",
+            },
+            timeout=20,
+            allow_redirects=True,
+        )
 
-def all_images(html: str):
-    out = []
-    # input name=... value="data:image/..."
-    for m in re.finditer(
-        r'<input\b[^>]*\bname\s*=\s*["\']([^"\']+)["\'][^>]*\bvalue\s*=\s*["\'](data:image/[^;]+;base64,[^"\']+)["\'][^>]*>',
-        html, re.S | re.I
-    ):
-        out.append({"name": m.group(1), "data": html_lib.unescape(m.group(2))})
-    # value पहले, name बाद
-    for m in re.finditer(
-        r'<input\b[^>]*\bvalue\s*=\s*["\'](data:image/[^;]+;base64,[^"\']+)["\'][^>]*\bname\s*=\s*["\']([^"\']+)["\'][^>]*>',
-        html, re.S | re.I
-    ):
-        out.append({"name": m.group(2), "data": html_lib.unescape(m.group(1))})
-    # <img src="data:image/...">
-    for i, m in enumerate(re.finditer(
-        r'<img\b[^>]*\bsrc\s*=\s*["\'](data:image/[^;]+;base64,[^"\']+)["\'][^>]*>',
-        html, re.S | re.I
-    )):
-        out.append({"name": f"img_src_{i}", "data": html_lib.unescape(m.group(1))})
-    # raw base64 hidden inputs
-    for m in re.finditer(
-        r'<input\b[^>]*\bname\s*=\s*["\']([^"\']+)["\'][^>]*\bvalue\s*=\s*["\']([A-Za-z0-9+/=\s]{200,})["\'][^>]*>',
-        html, re.S | re.I
-    ):
-        v = re.sub(r"\s+", "", m.group(2))
-        try:
-            base64.b64decode(v, validate=True)
-            out.append({"name": m.group(1), "data": v})
-        except Exception:
-            pass
-    return out
-
-
-def fix_data_uri(d):
-    if not d:
-        return None
-    if d.startswith("data:image"):
-        return d
-    try:
-        bin_data = base64.b64decode(d, validate=True)
-    except Exception:
-        return None
-    if bin_data.startswith(b"\x89PNG\r\n\x1a\n"):
-        mime = "image/png"
-    elif bin_data.startswith(b"\xff\xd8\xff"):
-        mime = "image/jpeg"
-    elif bin_data[:6] in (b"GIF87a", b"GIF89a"):
-        mime = "image/gif"
-    else:
-        mime = "image/jpeg"
-    return f"data:{mime};base64,{d}"
-
-
-def pick_photo_sign(html: str):
-    imgs = all_images(html)
-    photo, sign = None, None
-
-    # Pass 1: name based
-    for im in imgs:
-        n = im["name"].lower()
-        if not photo and re.search(r"(photo|img|image|pic)", n) \
-                and not re.search(r"sign|sig", n):
-            photo = im["data"]; continue
-        if not sign and re.search(r"(sign|sig)", n):
-            sign = im["data"]; continue
-
-    # Pass 2: known names
-    if not photo:
-        for n in ["imgHid", "photoHid", "imageHid", "dlphoto",
-                  "dlPhoto", "photo", "imgPhoto"]:
-            v = extract_input_value(html, n)
-            if v:
-                photo = "data:image/jpeg;base64," + v; break
-    if not sign:
-        for n in ["sigHid", "signHid", "signatureHid",
-                  "sign", "signature", "imgSign"]:
-            v = extract_input_value(html, n)
-            if v:
-                sign = "data:image/png;base64," + v; break
-
-    # Pass 3: पहले दो अलग images
-    if not photo and imgs:
-        photo = imgs[0]["data"]
-    if not sign and imgs:
-        for im in imgs:
-            if im["data"] != photo:
-                sign = im["data"]; break
-
-    return {"photo": fix_data_uri(photo), "signature": fix_data_uri(sign)}
+        # 3) STATEID cookie मिली?
+        ok = "STATEID" in session.cookies
+        return ok
+    except Exception as e:
+        print(f"[!] select_state: {e}", flush=True)
+        return False
 
 
 # ============================================================
-#  Multipart builder
-# ============================================================
-def build_multipart(boundary: str, fields: list) -> bytes:
-    parts = []
-    for name, value in fields:
-        parts.append(f"--{boundary}\r\n")
-        parts.append(f'Content-Disposition: form-data; name="{name}"\r\n\r\n')
-        parts.append(f"{value}\r\n")
-    parts.append(f"--{boundary}--\r\n")
-    return "".join(parts).encode("utf-8")
-
-
-# ============================================================
-#  Result detection
+#  STRICT: DL result page detect
 # ============================================================
 def is_dl_page(html: str, dlno: str = "") -> bool:
+    """
+    असली DL details page में ये ज़रूरी हैं:
+      - "Personal Details and Particulars of existing Licence" heading
+      - DL number वही हो जो भेजा था
+      - "Confirmed that the above Driving Licence details are mine" prompt
+    """
     if not html:
         return False
-    if re.search(r'name=["\']dlno["\']', html, re.I):
-        return False  # यह form page है
-    if "driving licence number" in html.lower():
-        return True
-    if dlno and dlno.upper() in html.upper() and "date of birth" in html.lower():
-        return True
+
+    soup = BeautifulSoup(html, "html.parser")
+    body_text = soup.get_text(" ", strip=True)
+
+    # असली result page में यह heading ज़रूर होती है (form में नहीं दिखती)
+    if "Personal Details and Particulars of existing Licence" not in body_text:
+        # यह heading result page पर ही आती है जब DL मिल जाता है
+        # लेकिन यह form में भी "display:none" के साथ है — पर text content में दिखेगा
+        pass
+
+    # ज़्यादा reliable: "Confirmed that the above Driving Licence details are mine"
+    # + <select name="dispDLDet"> वाला section दिखने लगे (यानी dlSerReqPersDet खुला हो)
+    if "dispDLDet" in html and "dlSerReqPersDet" in html:
+        # पता लगाएँ कि dlSerReqPersDet का display none नहीं है
+        # छोटा heuristic:
+        if re.search(r'id=["\']dlSerReqPersDet["\'][^>]*style=["\'][^"\']*display\s*:\s*none', html, re.I):
+            return False  # hidden है → form page
+        # visible है → result
+        if "Confirmed that the above Driving Licence details are mine" in body_text:
+            # और DL number भी दिख रहा हो
+            if dlno.upper() in html.upper():
+                return True
+
+    # backup: असली result में यह table मिलती है
+    if "Class of Vehicles" in body_text and "Validity Period" in body_text:
+        if "dispDLDet" in html and dlno.upper() in html.upper():
+            if not re.search(r'id=["\']dlSerReqPersDet["\'][^>]*style=["\'][^"\']*display\s*:\s*none', html, re.I):
+                return True
+
     return False
 
 
+# ============================================================
+#  Detect error
+# ============================================================
 def detect_error(html: str) -> str:
     low = html.lower()
     if "invalid captcha" in low or "captcha is invalid" in low:
         return "captcha_invalid"
-    if "no record" in low or "record not found" in low:
+    if "please enter captcha" in low:
+        return "captcha_empty"
+    if "no record found" in low or "no data found" in low:
         return "no_record"
     if "session expired" in low or "session timeout" in low:
         return "session_expired"
-    if "invalid dl" in low or "invalid licence" in low:
+    if "please select the state" in low:
+        return "state_not_selected"
+    if "invalid dl" in low or "invalid licence" in low or "not valid" in low:
         return "invalid_dl"
+    if "dob" in low and "not match" in low:
+        return "dob_mismatch"
     return "unknown"
 
 
+def html_preview(html: str, max_len: int = 400) -> str:
+    if not html:
+        return ""
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        texts = []
+        for sel in [".error", ".errormessage", ".alert", "#errormsg",
+                    ".success", ".info", "div[class*='error']",
+                    "div[class*='Error']", "span[class*='error']"]:
+            for el in soup.select(sel):
+                t = el.get_text(" ", strip=True)
+                if t:
+                    texts.append(t[:200])
+        if texts:
+            return " | ".join(texts)[:max_len]
+        body = soup.find("body")
+        if body:
+            t = re.sub(r"\s+", " ", body.get_text(" ", strip=True))
+            return t[:max_len]
+    except Exception:
+        pass
+    return re.sub(r"<[^>]+>", " ", html)[:max_len]
+
+
 # ============================================================
-#  Parse DL details from result HTML
+#  Parse DL details from visible result section
 # ============================================================
-def parse_result(html: str, dlno: str = "") -> dict:
-    addr = []
-    m = re.search(r'Present Address\s*:\s*</td>(.*?)</table>', html,
-                  re.S | re.I)
-    if m:
-        for l in re.findall(r'<td class="text-left">(.*?)</td>', m.group(1),
-                            re.S | re.I):
-            v = clean_text(l)
-            if v:
-                addr.append(v)
+def _norm(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip()).rstrip(":").lower()
 
-    cov = []
-    for row in re.finditer(
-        r'<td>\s*([A-Z0-9\-]{2,12})\s*</td>.*?<td>\s*<b class="control-label">\s*([^<]*)',
-        html, re.S | re.I
-    ):
-        cov.append({"cov": row.group(1).strip(),
-                    "issue_by": clean_text(row.group(2))})
 
-    badges = []
-    for b in re.findall(r'\)\s*([A-Z0-9/\-]{4,})\s*</div>', html, re.S | re.I):
-        badges.append(b.strip())
+def _val_from_pair(root, label: str) -> str:
+    """label cell के next sibling td की value"""
+    lab = _norm(label)
+    for cell in root.find_all(["td", "th"]):
+        if _norm(cell.get_text(" ", strip=True)) == lab:
+            nxt = cell.find_next_sibling("td")
+            if nxt:
+                v = re.sub(r"\s+", " ", nxt.get_text(" ", strip=True))
+                if v:
+                    return v
+    # prefix / contains
+    for cell in root.find_all(["td", "th"]):
+        txt = _norm(cell.get_text(" ", strip=True))
+        if txt.startswith(lab) and len(txt) < len(lab) + 20:
+            nxt = cell.find_next_sibling("td")
+            if nxt:
+                v = re.sub(r"\s+", " ", nxt.get_text(" ", strip=True))
+                if v and _norm(v) != lab:
+                    return v
+    return ""
 
-    imgs = pick_photo_sign(html)
+
+def _abs_url(u: str) -> str:
+    if not u:
+        return ""
+    if u.startswith("data:"):
+        return u
+    if u.startswith("http"):
+        return u
+    if u.startswith("/"):
+        return "https://sarathi.parivahan.gov.in" + u
+    return BASE + u.lstrip("./")
+
+
+def _is_logo(src: str) -> bool:
+    if not src:
+        return True
+    low = src.lower()
+    for b in ("/images/logo/", "ministry-nic", "parivahan-logo",
+              "digital_logo", "nhai", "emblem", "footer", ".ico", ".svg",
+              "nophoto", "nosignature", "refresh", "calendar"):
+        if b in low:
+            return True
+    return False
+
+
+def parse_dl(html: str, dlno: str = "") -> dict:
+    soup = BeautifulSoup(html, "html.parser")
+
+    # परिणाम section ढूँढें
+    result_section = soup.find(id="dlSerReqPersDet")
+    if result_section is None:
+        result_section = soup  # fallback
+
+    photo, sign = "", ""
+    for img in result_section.find_all("img"):
+        src = img.get("src", "") or ""
+        if _is_logo(src):
+            continue
+        if src.startswith("data:image"):
+            if not photo:
+                photo = src
+            elif not sign:
+                sign = src
+        else:
+            # relative photo URL हो सकती है
+            src_low = src.lower()
+            if "photo" in src_low and not photo:
+                photo = src
+            elif "sign" in src_low and not sign:
+                sign = src
+            elif not photo:
+                photo = src
+            elif not sign:
+                sign = src
+
+    name = _val_from_pair(result_section, "Name")
+    swd  = _val_from_pair(result_section, "S/W/D of") or _val_from_pair(result_section, "S/W/D")
+    dob  = _val_from_pair(result_section, "Date of Birth")
+
+    # State / RTO
+    state = _val_from_pair(result_section, "State")
+    rto   = _val_from_pair(result_section, "RTO")
 
     return {
-        "success": True,
-        "dlno": dlno,
-        "name": rx(r'class="text-right text-success">\s*Name\s*:\s*</td>\s*<td[^>]*>(.*?)</td>', html),
-        "father_name": rx(r'class="text-right text-success">\s*Father[^<]*?Name\s*:\s*</td>\s*<td[^>]*>(.*?)</td>', html),
-        "dob": rx(r'class="text-right text-success">\s*Date of Birth\s*:\s*</td>\s*<td[^>]*>(.*?)</td>', html),
-        "blood_group": rx(r'class="text-right text-success">\s*Blood Group\s*:\s*</td>\s*<td[^>]*>(.*?)</td>', html),
-        "category": rx(r'class="text-right text-success">\s*Category of the Driving Licence Holder\s*:\s*</td>\s*<td[^>]*>(.*?)</td>', html),
-        "present_address": ", ".join(addr) if addr else None,
-        "last_endorsed_state": rx(r'<b class="text-success">\s*State-\s*</b>\s*([^<]+)', html),
-        "last_endorsed_rto": rx(r'<b class="text-success">\s*RTO\s*-\s*</b>\s*([^<]+)', html),
-        "class_of_vehicles": cov,
-        "validity": rx(r'Transport\s*:\s*</label>\s*</div>\s*<div[^>]*>(.*?)</div>', html),
-        "badge_numbers": badges,
-        "photo": imgs["photo"],
-        "signature": imgs["signature"],
+        "success":             True,
+        "dlno":                dlno,
+        "name":                name,
+        "father_name":         swd,
+        "dob":                 dob,
+        "blood_group":         _val_from_pair(result_section, "Blood Group"),
+        "category":            _val_from_pair(result_section, "Category"),
+        "present_address":     _val_from_pair(result_section, "Present Address") or _val_from_pair(result_section, "Address"),
+        "last_endorsed_state": state,
+        "last_endorsed_rto":   rto,
+        "class_of_vehicles":   _val_from_pair(result_section, "Class of Vehicle") or _val_from_pair(result_section, "COV"),
+        "validity":            _val_from_pair(result_section, "Validity"),
+        "badge_numbers":       _val_from_pair(result_section, "Badge"),
+        "photo":               _abs_url(photo),
+        "signature":           _abs_url(sign),
     }
 
 
 # ============================================================
-#  OCR
+#  Build multipart body — DUPLICATE entCaptha + reset EMPTY
 # ============================================================
-def solve_captcha_with_ocr(img_bytes: bytes) -> str:
-    if not OCR_OK:
-        return ""
-    try:
-        raw = OCR.classification(img_bytes) or ""
-    except Exception as e:
-        print(f"[!] OCR error: {e}", flush=True)
-        return ""
-    clean = re.sub(r"[^A-Za-z0-9]", "", raw)
-    return clean
-
-
-# ============================================================
-#  CORE: single attempt
-# ============================================================
-def attempt_once(dlno: str, dob: str,
-                 state_code: str = "BR",
-                 state_name: str = "Bihar",
-                 st_name: str = "Maharashtra",
-                 rto_name: str = "RTO,BORIVALI",
-                 manual_captcha: str = "",
-                 manual_token: str = "",
-                 cookie_str: str = ""):
+def build_multipart_fields(token, captcha, dlno, dob, state, rto_code,
+                           st_name, rto_name, state_iso="BR"):
     """
-    Return dict with either:
-      {"success": True, ...fields...}   — DL found
-      {"success": False, "error": "...", "stage": "...", "captcha": "..."} 
+    Form में entCaptha दो बार है (visible + hidden)।
+    reset field खाली होना चाहिए (Reset button = 'Clear All' नहीं भेजना)।
     """
-    s = requests.Session()
-    s.headers.update({
-        "User-Agent": UA,
-        "Accept-Language": "en-US,en;q=0.9",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Origin": "https://sarathi.parivahan.gov.in",
-    })
+    fields = [
+        # header hidden fields
+        ("serday", "28"),
+        ("sermth", "9"),
+        ("seryr", str(datetime.utcnow().year)),
+        ("pincodeForIDPStateOfDL", ""),
+        ("rtopinMappingReqd", ""),
+        ("st_Cd_", state_iso),
+        ("capToDisp", ""),
+        ("captchaByApplicant", ""),
+        ("dlno", dlno),
+        ("dob", dob),
 
-    # Cookie preset (अगर दिया हो)
-    if cookie_str:
-        for pair in cookie_str.split(";"):
-            if "=" in pair:
-                k, v = pair.strip().split("=", 1)
-                s.cookies.set(k.strip(), v.strip(),
-                              domain="sarathi.parivahan.gov.in")
+        # visible captcha input
+        ("entCaptha", captcha),
 
-    log = []
+        ("PrivacyPolicyTermsofService", "true"),
+        ("__checkbox_PrivacyPolicyTermsofService", "true"),
 
-    try:
-        # -------- 0) state select --------
-        try:
-            r = s.post(BASE + "/stateSelectBean.do", data="stName=" + state_code,
-                       headers={"content-type": "application/x-www-form-urlencoded",
-                                "referer": BASE + "/stateSelection.do"},
-                       timeout=20, allow_redirects=True)
-            log.append({"state_select": r.status_code,
-                        "state_cookie": bool(s.cookies.get("STATEID"))})
-        except Exception as e:
-            log.append({"state_select_err": str(e)})
+        # result section defaults
+        ("dispDLDet", "Select"),
+        ("applcatgDLserReq", "General"),
+        ("PincodeDLserReq", ""),
+        ("stateCodeDLTr", state),
+        ("rtoCodeDLTr", rto_code or "-1"),
 
-        # -------- 1) form page → token --------
-        r = s.get(BASE + "/envaction.do", timeout=30)
-        log.append({"form_http": r.status_code})
-        if r.status_code != 200:
-            return {"success": False, "error": f"form HTTP {r.status_code}",
-                    "stage": "form", "log": log}
+        # submit button (हो सके तो)
+        ("dlconfirm", "Proceed"),
 
-        LAST_HTML["envaction"] = r.text
-        LAST_HTML["cookies"] = dict(s.cookies)
+        # token
+        ("struts.token.name", "token"),
+        ("token", token),
 
-        token = manual_token or extract_token(r.text)
-        if not token:
-            return {"success": False, "error": "token not found",
-                    "stage": "token", "log": log}
+        # IMPORTANT: reset खाली, "Clear All" नहीं
+        ("reset", ""),
+        ("s4msg", ""),
 
-        # -------- 2) captcha image --------
-        r = s.get(BASE + "/jsp/common/captchaimage.jsp",
-                  params={"_": int(time.time() * 1000)},
-                  headers={"Referer": BASE + "/envaction.do"},
-                  timeout=30)
-        if r.status_code != 200 or len(r.content) < 100:
-            return {"success": False, "error": "captcha fetch failed",
-                    "stage": "captcha", "log": log}
+        # दूसरा entCaptha (hidden) — same value भेजें
+        ("entCaptha", captcha),
 
-        captcha_bytes_len = len(r.content)
+        # hidden defaults
+        ("rtoNameSelPreAppl", ""),
+        ("dlno1", ""),
+        ("applnotransreq", ""),
+        ("dob1", ""),
+        ("stEndName", st_name),
+        ("rtoEndName", rto_name),
+        ("ApplFullNameDLSReq", ""),
+        ("isMatch", ""),
+        ("firstCap", "true"),
+        ("CapPho", ""),
+        ("idpchecked", ""),
+        ("SelDiplomat", ""),
+        ("scFaceAuthReqAiLib", ""),
+        ("faceauthmodel", "https://sarathi.parivahan.gov.in/cdn-sarathi/models"),
+        ("videoDevicesDetected", ""),
 
-        # -------- 3) OCR or manual --------
-        if manual_captcha:
-            captcha = manual_captcha
-            ocr_raw = "(manual)"
-        else:
-            if not OCR_OK:
-                return {"success": False, "error": "OCR unavailable",
-                        "stage": "ocr", "log": log}
-            try:
-                ocr_raw = OCR.classification(r.content) or ""
-            except Exception as oe:
-                return {"success": False, "error": f"OCR error: {oe}",
-                        "stage": "ocr", "log": log}
-            captcha = re.sub(r"[^A-Za-z0-9]", "", ocr_raw)
-
-        if len(captcha) < 3 or len(captcha) > 8:
-            return {"success": False,
-                    "error": f"bad captcha length ({len(captcha)})",
-                    "stage": "ocr", "captcha": captcha,
-                    "captcha_bytes": captcha_bytes_len,
-                    "log": log}
-
-        # -------- 4) getLastEndorsedRto --------
-        try:
-            r2 = s.post(BASE + "/getLastEndorsedRtoDLserReq.do?",
-                        data={"dlno": dlno, "dob": dob,
-                              "captchaByApplicant": captcha},
-                        headers={
-                            "accept": "application/json, text/javascript, */*; q=0.01",
-                            "content-type":
-                                "application/x-www-form-urlencoded; charset=UTF-8",
-                            "referer": BASE + "/envaction.do",
-                            "x-requested-with": "XMLHttpRequest",
-                        },
-                        timeout=30)
-            log.append({"last_rto": r2.status_code, "body": r2.text[:150]})
-        except Exception as e:
-            log.append({"last_rto_err": str(e)})
-
-        # -------- 5) envaction multipart POST --------
-        boundary = "----WebKitFormBoundary" + base64.b16encode(
-            os.urandom(12)).decode()
-
-        fields = [
-            ("capToDisp", ""),
-            ("captchaByApplicant", ""),
-            ("dlno", dlno),
-            ("dob", dob),
-            ("entCaptha", captcha),                # only once!
-            ("PrivacyPolicyTermsofService", "true"),
-            ("__checkbox_PrivacyPolicyTermsofService", "true"),
-            ("dispDLDet", "Select"),
-            ("applcatgDLserReq", "General"),
-            ("PincodeDLserReq", ""),
-            ("stateCodeDLTr", state_name),
-            ("rtoCodeDLTr", "-1"),
-            ("struts.token.name", "token"),
-            ("token", token),
-            ("reset", "formsubmit"),
-            ("s4msg", ""),
-            ("rtoNameSelPreAppl", ""),
-            ("dlno1", ""),
-            ("applnotransreq", ""),
-            ("dob1", ""),
-            ("stEndName", st_name),
-            ("rtoEndName", rto_name),
-            ("ApplFullNameDLSReq", ""),
-            ("isMatch", ""),
-            ("firstCap", "true"),
-            ("CapPho", ""),
-            ("idpchecked", ""),
-            ("SelDiplomat", ""),
-            ("scFaceAuthReqAiLib", ""),
-            ("faceauthmodel",
-             "https://sarathi.parivahan.gov.in/cdn-sarathi/models"),
-            ("videoDevicesDetected", ""),
-        ]
-
-        body = build_multipart(boundary, fields)
-
-        r = s.post(BASE + "/envaction.do", data=body,
-                   headers={
-                       "content-type": f"multipart/form-data; boundary={boundary}",
-                       "referer": BASE + "/envaction.do",
-                   },
-                   timeout=60)
-        log.append({"submit_http": r.status_code, "len": len(r.text)})
-        LAST_HTML["submit"] = r.text
-        LAST_HTML["cookies"] = dict(s.cookies)
-
-        # -------- 6) result check --------
-        if is_dl_page(r.text, dlno):
-            result = parse_result(r.text, dlno)
-            # अगर असली fields खाली हैं → fail
-            if not result.get("name") and not result.get("dob"):
-                return {"success": False,
-                        "error": "result page मिला पर fields खाली",
-                        "stage": "parse_empty",
-                        "captcha": captcha,
-                        "log": log}
-            result["captcha"] = captcha
-            result["ocr_raw"] = ocr_raw
-            result["log"] = log
-            return result
-
-        err = detect_error(r.text)
-        return {"success": False,
-                "error": f"result page नहीं मिला ({err})",
-                "stage": err,
-                "captcha": captcha,
-                "ocr_raw": ocr_raw,
-                "log": log}
-
-    except requests.exceptions.Timeout:
-        return {"success": False, "error": "timeout", "log": log}
-    except requests.exceptions.RequestException as e:
-        return {"success": False, "error": f"network: {e}", "log": log}
-    except Exception as e:
-        return {"success": False,
-                "error": f"{type(e).__name__}: {e}",
-                "trace": traceback.format_exc()[:600],
-                "log": log}
+        # extra hidden inputs
+        ("umfPresent", "false"),
+        ("FaceAuthReq", "false"),
+        ("StateName", state),
+    ]
+    return fields
 
 
 # ============================================================
-#  CORE: retry loop
+#  Core fetch
 # ============================================================
-def fetch_dl(dlno: str, dob: str,
-             state_code: str = "BR",
-             state_name: str = "Bihar",
-             st_name: str = "Maharashtra",
-             rto_name: str = "RTO,BORIVALI",
-             max_attempts: int = 10,
-             debug: bool = False) -> dict:
+def fetch_dl(dlno, dob, state="Bihar", rto_code="", st_name="",
+             rto_name="", max_attempts=12, do_state_select=True):
 
     attempts = []
     started = datetime.utcnow().isoformat() + "Z"
 
     if not OCR_OK:
-        return {"success": False,
-                "error": "OCR engine (ddddocr) load नहीं हुआ",
-                "ocr_engine": "none",
-                "attempts": attempts}
+        return {"success": False, "error": "OCR not loaded",
+                "ocr_engine": "none", "attempts": attempts}
 
-    for i in range(1, max_attempts + 1):
-        res = attempt_once(dlno, dob, state_code, state_name, st_name, rto_name)
+    if not st_name:
+        st_name = state
 
-        attempts.append({
-            "attempt": i,
-            "success": res.get("success"),
-            "error": res.get("error"),
-            "stage": res.get("stage"),
-            "captcha": res.get("captcha"),
-            "ocr_raw": res.get("ocr_raw"),
-            "log": res.get("log"),
-        })
+    state_iso = STATE_CODES.get(state, state[:2].upper())
 
-        if res.get("success"):
-            res["attempts"] = attempts
-            res["ocr_engine"] = "ddddocr"
-            res["started_at"] = started
-            res["finished_at"] = datetime.utcnow().isoformat() + "Z"
-            if not debug:
-                res.pop("_debug", None)
-            return res
+    for attempt in range(1, max_attempts + 1):
+        s = new_session()
+        info = {"attempt": attempt}
 
-        # "No record" जैसी non-retryable errors पर रुक जाएँ
-        stage = res.get("stage", "")
-        if stage in ("no_record", "invalid_dl"):
-            break
+        try:
+            # 0) state selection (only first attempt)
+            if do_state_select and attempt == 1:
+                ok = select_state(s, state_iso)
+                info["state_selected"] = ok
+                info["state_code"] = state_iso
+                if not ok:
+                    info["error"] = "state selection failed"
+                    attempts.append(info)
+                    continue
+            elif attempt > 1:
+                # refresh cookies
+                ok = select_state(s, state_iso)
+                info["state_selected"] = ok
 
-        time.sleep(1.0)
+            # 1) form load (referer = dlServicesDet.do — जैसा browser में होता है)
+            r = s.get(
+                BASE + "envaction.do",
+                timeout=30,
+                headers={"Referer": BASE + "dlServicesDet.do"},
+            )
+            info["form_http"] = r.status_code
+            if r.status_code != 200:
+                info["error"] = f"form HTTP {r.status_code}"
+                attempts.append(info)
+                continue
+
+            LAST_HTML["envaction"] = r.text
+
+            token = extract_token(r.text)
+            if not token:
+                info["error"] = "token नहीं मिला"
+                attempts.append(info)
+                continue
+            info["token"] = token[:12] + "…"
+
+            # 2) captcha
+            r = s.get(
+                BASE + "jsp/common/captchaimage.jsp",
+                params={"_": int(time.time() * 1000)},
+                timeout=30,
+                headers={"Referer": BASE + "envaction.do"},
+            )
+            if r.status_code != 200 or len(r.content) < 100:
+                info["error"] = "captcha fetch failed"
+                attempts.append(info)
+                continue
+            info["captcha_bytes"] = len(r.content)
+
+            # 3) OCR
+            try:
+                raw = OCR.classification(r.content) or ""
+            except Exception as oe:
+                info["error"] = f"OCR error: {oe}"
+                attempts.append(info)
+                continue
+
+            captcha = re.sub(r"[^A-Za-z0-9]", "", raw)
+            info["captcha_raw"]   = raw
+            info["captcha_clean"] = captcha
+
+            if len(captcha) < 4 or len(captcha) > 8:
+                info["error"] = "captcha length unexpected"
+                attempts.append(info)
+                continue
+
+            # 4) build multipart fields
+            fields = build_multipart_fields(
+                token, captcha, dlno, dob, state, rto_code,
+                st_name, rto_name, state_iso
+            )
+
+            # requests को multipart भेजने के लिए files=[] trick
+            # (None, value) = regular form field, कोई filename नहीं
+            files = [(name, (None, str(val))) for name, val in fields]
+
+            r = s.post(
+                BASE + "envaction.do",
+                files=files,
+                timeout=60,
+                headers={
+                    "Referer": BASE + "envaction.do",
+                    "Origin": "https://sarathi.parivahan.gov.in",
+                },
+            )
+            info["submit_http"] = r.status_code
+            info["submit_url"]  = r.url
+            info["resp_len"]    = len(r.text)
+            LAST_HTML["submit"] = r.text
+
+            # 5) strict check
+            if is_dl_page(r.text, dlno):
+                result = parse_dl(r.text, dlno)
+
+                # name/dob न मिले तो भी "details page मिला" यह अच्छा signal है
+                if not result.get("name") and not result.get("dob"):
+                    info["error"] = "result page मिला पर fields खाली"
+                    info["preview"] = html_preview(r.text, 250)
+                    attempts.append(info)
+                    time.sleep(1)
+                    continue
+
+                result["attempts"]    = attempts + [info]
+                result["ocr_engine"]  = "ddddocr"
+                result["started_at"]  = started
+                result["finished_at"] = datetime.utcnow().isoformat() + "Z"
+                return result
+
+            # 6) error detect
+            err = detect_error(r.text)
+            info["error"]   = f"result page नहीं मिला ({err})"
+            info["preview"] = html_preview(r.text, 300)
+            attempts.append(info)
+
+            time.sleep(1)
+
+        except requests.exceptions.Timeout:
+            info["error"] = "timeout"
+            attempts.append(info)
+        except requests.exceptions.RequestException as e:
+            info["error"] = f"network: {e}"
+            attempts.append(info)
+        except Exception as e:
+            info["error"] = f"{type(e).__name__}: {e}"
+            info["trace"] = traceback.format_exc()[:400]
+            attempts.append(info)
 
     return {
-        "success": False,
-        "error": f"{max_attempts} attempts में DL details नहीं मिलीं",
-        "ocr_engine": "ddddocr",
-        "attempts": attempts,
-        "started_at": started,
+        "success":     False,
+        "error":       f"{max_attempts} attempts में DL details नहीं मिलीं",
+        "ocr_engine":  "ddddocr",
+        "attempts":    attempts,
+        "started_at":  started,
         "finished_at": datetime.utcnow().isoformat() + "Z",
-        "hint": "/api/debug?which=submit&format=text पर असली response देखें",
+        "hint":        "/api/debug?which=submit&format=text पर असली response देखें",
     }
 
 
@@ -554,32 +570,30 @@ def index():
     return render_template("index.html")
 
 
-@app.route("/api/dl", methods=["GET", "POST"])
+@app.route("/api/dl")
 def api_dl():
-    src = request.form if request.method == "POST" else request.args
+    dlno = (request.args.get("dlno") or "").strip().upper()
+    dob  = (request.args.get("dob")  or "").strip()
+    if not dlno or not dob:
+        return jsonify({"success": False, "error": "dlno और dob ज़रूरी हैं"}), 400
+    if not re.fullmatch(r"\d{2}-\d{2}-\d{4}", dob):
+        return jsonify({"success": False, "error": "dob format DD-MM-YYYY"}), 400
 
-    dlno = (src.get("dlno") or "").strip().upper()
-    dob = (src.get("dob") or "").strip()
-
-    if not dlno or not re.match(r"^\d{2}-\d{2}-\d{4}$", dob):
-        return jsonify({"success": False,
-                        "error": "dlno और dob (DD-MM-YYYY) ज़रूरी हैं"}), 400
-
-    state_name = src.get("stateCodeDLTr", "Bihar")
-    state_code = src.get("state_code", "BR")
-    st_name = src.get("stEndName", "Maharashtra")
-    rto_name = src.get("rtoEndName", "RTO,BORIVALI")
+    state    = request.args.get("state", "Bihar")
+    rto_code = request.args.get("rto_code", "")
+    st_name  = request.args.get("st_name", state)
+    rto_name = request.args.get("rto_name", "")
 
     try:
-        max_try = int(src.get("max_try", "10"))
+        max_try = int(request.args.get("max_try", "12"))
     except ValueError:
-        max_try = 10
-    max_try = max(1, min(max_try, 15))
+        max_try = 12
+    max_try = max(1, min(max_try, 20))
 
-    debug = src.get("debug", "0") in ("1", "true", "yes")
+    do_state = request.args.get("state_select", "1") == "1"
 
-    return jsonify(fetch_dl(dlno, dob, state_code, state_name,
-                            st_name, rto_name, max_try, debug))
+    return jsonify(fetch_dl(dlno, dob, state, rto_code, st_name,
+                            rto_name, max_try, do_state))
 
 
 @app.route("/api/debug")
@@ -590,22 +604,25 @@ def api_debug():
         return jsonify({"error": f"कोई '{which}' response save नहीं"}), 404
 
     if request.args.get("format") == "text":
-        from flask import Response
-        soup_text = re.sub(r"<[^>]+>", " ", html)
-        soup_text = re.sub(r"\s+", " ", soup_text)
-        return Response(soup_text[:8000], mimetype="text/plain; charset=utf-8")
+        text = html_preview(html, 8000)
+        return Response(text, mimetype="text/plain; charset=utf-8")
 
+    if request.args.get("format") == "html":
+        return Response(html[:100000], mimetype="text/html; charset=utf-8")
+
+    soup = BeautifulSoup(html, "html.parser")
     return jsonify({
-        "length": len(html),
-        "has_form": bool(re.search(r'name=["\']dlno["\']', html, re.I)),
-        "has_dl_head": "Driving Licence Number" in html,
-        "detected_error": detect_error(html),
-        "cookies": LAST_HTML.get("cookies", {}),
-        "images_found": [
-            {"name": im["name"], "len": len(im["data"]),
-             "head": im["data"][:60]}
-            for im in all_images(html)
-        ],
+        "length":          len(html),
+        "title":           soup.title.string if soup.title else None,
+        "has_form":        bool(re.search(r'name=["\']dlno["\']', html, re.I)),
+        "has_dl_head":     "Driving Licence Number" in html,
+        "has_result_sect": "dlSerReqPersDet" in html,
+        "result_visible":  not bool(re.search(
+            r'id=["\']dlSerReqPersDet["\'][^>]*style=["\'][^"\']*display\s*:\s*none',
+            html, re.I)),
+        "detected_error":  detect_error(html),
+        "preview":         html_preview(html, 500),
+        "hint":            "format=text या format=html जोड़कर पूरा देखें",
     })
 
 
