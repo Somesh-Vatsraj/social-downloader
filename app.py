@@ -27,17 +27,21 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
       "Chrome/153.0.0.0 Safari/537.36")
 
 STATE_CODES = {
-    "Maharashtra":"MH","Bihar":"BR","Delhi":"DL","Karnataka":"KA",
-    "Tamil Nadu":"TN","Uttar Pradesh":"UP","Gujarat":"GJ","Rajasthan":"RJ",
-    "West Bengal":"WB","Madhya Pradesh":"MP","Kerala":"KL","Punjab":"PB",
-    "Haryana":"HR","Telangana":"TG","Andhra Pradesh":"AP","Odisha":"OD",
-    "Assam":"AS","Jharkhand":"JH","Uttarakhand":"UK","Himachal Pradesh":"HP","Goa":"GA",
+    "Maharashtra": "MH", "Bihar": "BR", "Delhi": "DL", "Karnataka": "KA",
+    "Tamil Nadu": "TN", "Uttar Pradesh": "UP", "Gujarat": "GJ", "Rajasthan": "RJ",
+    "West Bengal": "WB", "Madhya Pradesh": "MP", "Kerala": "KL", "Punjab": "PB",
+    "Haryana": "HR", "Telangana": "TG", "Andhra Pradesh": "AP", "Odisha": "OD",
+    "Assam": "AS", "Jharkhand": "JH", "Uttarakhand": "UK", "Himachal Pradesh": "HP",
+    "Goa": "GA",
 }
+
+# Reverse map: "MH" -> "Maharashtra"
+STATE_BY_CODE = {v.upper(): k for k, v in STATE_CODES.items()}
 
 TMP = "/tmp" if os.path.isdir("/tmp") else os.environ.get("TEMP", ".")
 
 # ============================================================
-#  Session dir (per sid — but API uses fresh sid each call)
+#  Session dir
 # ============================================================
 def sid_dir(sid):
     sid = re.sub(r"[^a-f0-9]", "", sid) or "default"
@@ -330,7 +334,7 @@ def try_once(dlno, dob, state, sid=None):
         ("dispDLDet", "Select"),
         ("applcatgDLserReq", "General"),
         ("PincodeDLserReq", ""),
-        ("stateCodeDLTr", state),
+        ("stateCodeDLTr", state_code),   # <-- state CODE bhej rahe hain (fix)
         ("rtoCodeDLTr", "-1"),
         ("struts.token.name", "token"),
         ("token", token),
@@ -379,7 +383,8 @@ def api_dl():
     Query / Body params:
       dlno      (required)  e.g. MH0220100024875
       dob       (required)  DD-MM-YYYY
-      state     (optional, default "Bihar")
+      state     (optional)  full name e.g. "Maharashtra".
+                            Agar nahi diya to DL prefix (MH/BR/DL...) se auto-detect.
       max_try   (optional, default 15, max 25)
 
     Returns JSON with DL details on success.
@@ -387,7 +392,12 @@ def api_dl():
     data = request.get_json(silent=True) or request.form or request.args
     dlno = re.sub(r"\s+", "", (data.get("dlno") or "").strip().upper())
     dob  = (data.get("dob") or "").strip()
-    state = (data.get("state") or "Bihar").strip()
+
+    # --- State auto-detect from DL number prefix (MH, BR, DL, KA...) ---
+    state = (data.get("state") or "").strip()
+    if not state:
+        prefix = dlno[:2].upper()
+        state = STATE_BY_CODE.get(prefix, "Maharashtra")
 
     if not dlno or not dob:
         return jsonify({"success": False, "error": "dlno और dob ज़रूरी हैं"}), 400
@@ -412,6 +422,7 @@ def api_dl():
 
         if ok:
             result["success"] = True
+            result["state_used"] = state
             result["attempts"] = i
             result["elapsed_sec"] = round(time.time() - started, 2)
             return jsonify(result)
@@ -421,6 +432,7 @@ def api_dl():
 
     return jsonify({
         "success": False,
+        "state_used": state,
         "error": f"{max_try} attempts में DL details नहीं मिलीं",
         "attempts": attempts,
     }), 422
