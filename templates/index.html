@@ -26,19 +26,8 @@
     border: 1px solid #e2e8f0;
   }
 
-  h1 {
-    margin: 0 0 6px;
-    font-size: 22px;
-    color: #1e3a8a;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-  }
-  p.sub {
-    margin: 0 0 24px;
-    color: #64748b;
-    font-size: 13.5px;
-  }
+  h1 { margin: 0 0 6px; font-size: 22px; color: #1e3a8a; }
+  p.sub { margin: 0 0 24px; color: #64748b; font-size: 13.5px; }
 
   label {
     display: block;
@@ -48,8 +37,7 @@
     margin: 14px 0 6px;
   }
 
-  input[type="text"],
-  input:not([type]) {
+  input[type="text"], input:not([type]) {
     width: 100%;
     padding: 11px 14px;
     border: 1.5px solid #cbd5e1;
@@ -59,8 +47,7 @@
     transition: border-color .15s, box-shadow .15s;
     color: #0f172a;
   }
-  input[type="text"]:focus,
-  input:not([type]):focus {
+  input[type="text"]:focus, input:not([type]):focus {
     outline: none;
     border-color: #2563eb;
     box-shadow: 0 0 0 4px rgba(37, 99, 235, .12);
@@ -83,43 +70,24 @@
     justify-content: center;
     gap: 8px;
   }
-  button:disabled {
-    background: #94a3b8;
-    cursor: not-allowed;
-    opacity: .8;
-  }
+  button:disabled { background: #94a3b8; cursor: not-allowed; opacity: .8; }
   button:hover:not(:disabled)  { background: #1d4ed8; }
   button:active:not(:disabled) { transform: scale(.985); }
 
-  button.secondary {
-    background: #64748b;
-    margin-top: 10px;
-  }
+  button.secondary { background: #64748b; margin-top: 10px; }
   button.secondary:hover:not(:disabled) { background: #475569; }
 
-  .row {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 12px;
-  }
-  @media (max-width: 520px) {
-    .row { grid-template-columns: 1fr; }
-  }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 520px) { .row { grid-template-columns: 1fr; } }
 
-  .step {
-    display: none;
-    animation: fadeIn .28s ease-in;
-  }
+  .step { display: none; animation: fadeIn .28s ease-in; }
   .step.active { display: block; }
-
   @keyframes fadeIn {
     from { opacity: 0; transform: translateY(8px); }
     to   { opacity: 1; transform: translateY(0); }
   }
 
-  /* =========================================
-     CAPTCHA BOX — बड़ा और साफ़
-     ========================================= */
+  /* ============ CAPTCHA BOX ============ */
   .captcha-box {
     display: flex;
     align-items: center;
@@ -133,15 +101,14 @@
   }
 
   .captcha-box img {
-    height: 90px;              /* 3.6× बड़ा */
+    height: 90px;
     width: auto;
-    min-width: 220px;          /* अगर image बहुत छोटी हो तो */
+    min-width: 220px;
     max-width: 380px;
     padding: 8px 12px;
     background: #ffffff;
     border: 2px solid #94a3b8;
     border-radius: 8px;
-    /* upscale करने पर धुंधला न हो */
     image-rendering: -webkit-optimize-contrast;
     image-rendering: crisp-edges;
     image-rendering: pixelated;
@@ -150,15 +117,16 @@
     object-fit: contain;
   }
 
+  /* ✅ CAPITAL / small — जैसा टाइप करें वैसा दिखे */
   .captcha-box input {
     flex: 1;
     min-width: 0;
-    font-size: 26px;
+    font-size: 28px;
     letter-spacing: 8px;
     text-align: center;
     font-family: 'Courier New', 'Consolas', monospace;
     font-weight: 700;
-    text-transform: lowercase;
+    text-transform: none;          /* ✅ पहले lowercase था — अब कुछ नहीं */
     padding: 16px 14px;
     border: 2px solid #94a3b8;
     border-radius: 10px;
@@ -174,25 +142,14 @@
   }
 
   @media (max-width: 560px) {
-    .captcha-box {
-      flex-direction: column;
-      align-items: stretch;
-    }
+    .captcha-box { flex-direction: column; align-items: stretch; }
     .captcha-box img {
-      height: 80px;
-      min-width: 0;
-      max-width: 100%;
+      height: 80px; min-width: 0; max-width: 100%;
       align-self: center;
     }
-    .captcha-box input {
-      font-size: 22px;
-      letter-spacing: 6px;
-    }
+    .captcha-box input { font-size: 24px; letter-spacing: 6px; }
   }
 
-  /* =========================================
-     ALERTS
-     ========================================= */
   .alert {
     padding: 12px 14px;
     border-radius: 9px;
@@ -205,18 +162,13 @@
   .alert.info  { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; display: block; }
   .alert.ok    { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; display: block; }
 
-  /* =========================================
-     RESULT
-     ========================================= */
   .result-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 10px;
     margin-top: 16px;
   }
-  @media (max-width: 560px) {
-    .result-grid { grid-template-columns: 1fr; }
-  }
+  @media (max-width: 560px) { .result-grid { grid-template-columns: 1fr; } }
 
   .result-grid .item {
     padding: 11px 13px;
@@ -227,66 +179,34 @@
   }
   .result-grid .item.full { grid-column: 1 / -1; }
   .result-grid .k {
-    color: #64748b;
-    font-size: 11.5px;
-    text-transform: uppercase;
-    letter-spacing: .5px;
-    font-weight: 600;
-    margin-bottom: 3px;
+    color: #64748b; font-size: 11.5px; text-transform: uppercase;
+    letter-spacing: .5px; font-weight: 600; margin-bottom: 3px;
   }
   .result-grid .v {
-    color: #0f172a;
-    font-weight: 600;
-    word-break: break-word;
-    line-height: 1.4;
+    color: #0f172a; font-weight: 600; word-break: break-word; line-height: 1.4;
   }
 
-  .imgs {
-    display: flex;
-    gap: 14px;
-    margin-top: 18px;
-    flex-wrap: wrap;
-  }
+  .imgs { display: flex; gap: 14px; margin-top: 18px; flex-wrap: wrap; }
   .imgs img {
-    max-height: 120px;
-    border-radius: 8px;
-    background: #f1f5f9;
-    padding: 5px;
-    border: 1px solid #e2e8f0;
+    max-height: 120px; border-radius: 8px; background: #f1f5f9;
+    padding: 5px; border: 1px solid #e2e8f0;
   }
 
   .loader {
-    display: inline-block;
-    width: 15px; height: 15px;
-    border: 2.5px solid #fff;
-    border-top-color: transparent;
-    border-radius: 50%;
-    animation: spin .8s linear infinite;
+    display: inline-block; width: 15px; height: 15px;
+    border: 2.5px solid #fff; border-top-color: transparent;
+    border-radius: 50%; animation: spin .8s linear infinite;
   }
   @keyframes spin { to { transform: rotate(360deg); } }
 
-  details {
-    margin-top: 20px;
-    font-size: 12px;
-  }
-  details summary {
-    cursor: pointer;
-    color: #64748b;
-    user-select: none;
-  }
+  details { margin-top: 20px; font-size: 12px; }
+  details summary { cursor: pointer; color: #64748b; user-select: none; }
   details pre {
-    background: #0f172a;
-    color: #e2e8f0;
-    padding: 14px;
-    border-radius: 8px;
-    overflow: auto;
-    margin-top: 10px;
-    max-height: 320px;
-    font-size: 11.5px;
-    line-height: 1.5;
+    background: #0f172a; color: #e2e8f0; padding: 14px;
+    border-radius: 8px; overflow: auto; margin-top: 10px;
+    max-height: 320px; font-size: 11.5px; line-height: 1.5;
   }
 
-  /* कैप्चा refresh hint */
   .captcha-hint {
     font-size: 12px;
     color: #64748b;
@@ -303,7 +223,7 @@
   <h1>🚗 Sarathi DL Details Fetcher</h1>
   <p class="sub">कैप्चा खुद टाइप करें — कोई OCR नहीं, 100% भरोसेमंद</p>
 
-  <!-- ============================== STEP 1 ============================== -->
+  <!-- ============== STEP 1 ============== -->
   <div class="step active" id="step1">
     <label>Driving Licence Number</label>
     <input id="dlno" placeholder="MH0220100024875" value="MH0220100024875"
@@ -342,10 +262,11 @@
     <div class="alert" id="alert1"></div>
   </div>
 
-  <!-- ============================== STEP 2 ============================== -->
+  <!-- ============== STEP 2 ============== -->
   <div class="step" id="step2">
     <div class="alert info" id="alert2">
-      नीचे कैप्चा image में जो अक्षर दिख रहे हैं, वही टाइप करें। (छोटे-बड़े अक्षर का फ़र्क नहीं)
+      नीचे कैप्चा image में जो अक्षर दिख रहे हैं, वही टाइप करें।
+      <br><b>⚠️ छोटे-बड़े अक्षर का ध्यान रखें</b> — जैसा दिख रहा है वैसा ही टाइप करें।
     </div>
 
     <div class="captcha-box">
@@ -374,7 +295,7 @@
     <div class="alert" id="alert2b"></div>
   </div>
 
-  <!-- ============================== STEP 3 ============================== -->
+  <!-- ============== STEP 3 ============== -->
   <div class="step" id="step3">
     <div class="alert ok" id="alert3">✅ DL details मिल गईं</div>
 
@@ -384,7 +305,6 @@
     <button id="btnNew" class="secondary">🔍 नया DL खोजें</button>
   </div>
 
-  <!-- Debug -->
   <details id="debugDetails" style="display:none;">
     <summary>Debug output</summary>
     <pre id="debugPre"></pre>
@@ -423,7 +343,7 @@ function setLoading(btn, on, text) {
   }
 }
 
-// ---------------- STEP 1 → Get Captcha ----------------
+// ---------- STEP 1: Get Captcha ----------
 $("btnGetCaptcha").onclick = async () => {
   setAlert(alert1, "");
 
@@ -462,19 +382,15 @@ $("btnGetCaptcha").onclick = async () => {
     currentSid = j.sid;
     currentFormData = data;
 
-    // कैप्चा image सेट करें
-    const img = $("captchaImg");
-    img.onload = () => {
-      // अगर original बहुत छोटी है, तो CSS min-width से बड़ी दिखेगी
-    };
-    img.src = "data:image/png;base64," + j.captcha;
+    $("captchaImg").src = "data:image/png;base64," + j.captcha;
 
-    $("captchaInput").value = "";
+    // ✅ input clear करें और ध्यान से टाइप करवाएँ
+    const inp = $("captchaInput");
+    inp.value = "";
+    inp.style.textTransform = "none";   // double safety
     setAlert(alert2b, "");
     show(step2);
-
-    // input focus (slight delay mobile keyboard के लिए)
-    setTimeout(() => $("captchaInput").focus(), 150);
+    setTimeout(() => inp.focus(), 150);
   } catch (e) {
     setAlert(alert1, "❌ " + e.message, "error");
   } finally {
@@ -482,7 +398,7 @@ $("btnGetCaptcha").onclick = async () => {
   }
 };
 
-// ---------------- STEP 2 → Submit ----------------
+// ---------- STEP 2: Submit ----------
 async function doSubmit() {
   const captcha = $("captchaInput").value.trim();
   if (!captcha) {
@@ -506,7 +422,6 @@ async function doSubmit() {
       const code = j.code || "";
       setAlert(alert2b, "❌ " + (j.error || "असफल"), "error");
 
-      // कैप्चा गलत या session expire → वापस step1
       if (code === "captcha_invalid" || code === "session_expired") {
         setTimeout(() => {
           setAlert(alert1, "⚠️ कैप्चा गलत था — नया कैप्चा लें", "info");
@@ -539,7 +454,7 @@ $("captchaInput").addEventListener("keydown", e => {
   }
 });
 
-// ---------------- Back ----------------
+// ---------- Back ----------
 $("btnBack").onclick = () => {
   currentSid = null;
   setAlert(alert2b, "");
@@ -547,7 +462,7 @@ $("btnBack").onclick = () => {
   show(step1);
 };
 
-// ---------------- New search ----------------
+// ---------- New ----------
 $("btnNew").onclick = () => {
   currentSid = null;
   $("resultGrid").innerHTML = "";
@@ -556,7 +471,7 @@ $("btnNew").onclick = () => {
   show(step1);
 };
 
-// ---------------- Render result ----------------
+// ---------- Render result ----------
 function renderResult(j) {
   const fields = [
     ["dlno",                "DL Number"],
@@ -590,7 +505,6 @@ function renderResult(j) {
 
   const imgs = $("imgs");
   imgs.innerHTML = "";
-
   if (j.photo) {
     const i = document.createElement("img");
     i.src = j.photo;
@@ -607,15 +521,11 @@ function renderResult(j) {
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, c => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;",
+    "&": "&amp;", "<": "&lt;", ">": "&gt;",
+    '"': "&quot;", "'": "&#39;",
   }[c]));
 }
 
-// पेज खुलते ही पहला input focus
 window.addEventListener("load", () => {
   setTimeout(() => $("dlno").focus(), 200);
 });
