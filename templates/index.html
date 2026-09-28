@@ -3,532 +3,204 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Sarathi DL Fetcher — Manual Captcha</title>
+<title>Sarathi DL Details — OCR + Manual</title>
 <style>
-  * { box-sizing: border-box; }
-
-  body {
-    font-family: system-ui, -apple-system, "Segoe UI", Arial, sans-serif;
-    background: linear-gradient(135deg, #eef2ff 0%, #f0f4f8 100%);
-    margin: 0;
-    padding: 24px 16px;
-    min-height: 100vh;
-    color: #0f172a;
-  }
-
-  .card {
-    max-width: 740px;
-    margin: 0 auto;
-    background: #ffffff;
-    border-radius: 16px;
-    padding: 28px;
-    box-shadow: 0 8px 32px rgba(15, 23, 42, 0.08);
-    border: 1px solid #e2e8f0;
-  }
-
-  h1 { margin: 0 0 6px; font-size: 22px; color: #1e3a8a; }
-  p.sub { margin: 0 0 24px; color: #64748b; font-size: 13.5px; }
-
-  label {
-    display: block;
-    font-size: 12.5px;
-    font-weight: 600;
-    color: #334155;
-    margin: 14px 0 6px;
-  }
-
-  input[type="text"], input:not([type]) {
-    width: 100%;
-    padding: 11px 14px;
-    border: 1.5px solid #cbd5e1;
-    border-radius: 9px;
-    font-size: 14px;
-    background: #fff;
-    transition: border-color .15s, box-shadow .15s;
-    color: #0f172a;
-  }
-  input[type="text"]:focus, input:not([type]):focus {
-    outline: none;
-    border-color: #2563eb;
-    box-shadow: 0 0 0 4px rgba(37, 99, 235, .12);
-  }
-
-  button {
-    width: 100%;
-    margin-top: 20px;
-    padding: 13px 16px;
-    background: #2563eb;
-    color: #fff;
-    border: none;
-    border-radius: 9px;
-    font-size: 15px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background .15s, transform .08s;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-  }
-  button:disabled { background: #94a3b8; cursor: not-allowed; opacity: .8; }
-  button:hover:not(:disabled)  { background: #1d4ed8; }
-  button:active:not(:disabled) { transform: scale(.985); }
-
-  button.secondary { background: #64748b; margin-top: 10px; }
-  button.secondary:hover:not(:disabled) { background: #475569; }
-
-  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  @media (max-width: 520px) { .row { grid-template-columns: 1fr; } }
-
-  .step { display: none; animation: fadeIn .28s ease-in; }
-  .step.active { display: block; }
-  @keyframes fadeIn {
-    from { opacity: 0; transform: translateY(8px); }
-    to   { opacity: 1; transform: translateY(0); }
-  }
-
-  /* ============ CAPTCHA BOX ============ */
-  .captcha-box {
-    display: flex;
-    align-items: center;
-    gap: 18px;
-    margin: 20px 0;
-    padding: 18px;
-    background: #ffffff;
-    border: 2px solid #cbd5e1;
-    border-radius: 12px;
-    box-shadow: inset 0 1px 4px rgba(15, 23, 42, .04);
-  }
-
-  .captcha-box img {
-    height: 90px;
-    width: auto;
-    min-width: 220px;
-    max-width: 380px;
-    padding: 8px 12px;
-    background: #ffffff;
-    border: 2px solid #94a3b8;
-    border-radius: 8px;
-    image-rendering: -webkit-optimize-contrast;
-    image-rendering: crisp-edges;
-    image-rendering: pixelated;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, .08);
-    flex-shrink: 0;
-    object-fit: contain;
-  }
-
-  /* ✅ CAPITAL / small — जैसा टाइप करें वैसा दिखे */
-  .captcha-box input {
-    flex: 1;
-    min-width: 0;
-    font-size: 28px;
-    letter-spacing: 8px;
-    text-align: center;
-    font-family: 'Courier New', 'Consolas', monospace;
-    font-weight: 700;
-    text-transform: none;          /* ✅ पहले lowercase था — अब कुछ नहीं */
-    padding: 16px 14px;
-    border: 2px solid #94a3b8;
-    border-radius: 10px;
-    background: #f8fafc;
-    color: #0f172a;
-    transition: border-color .15s, box-shadow .15s, background .15s;
-  }
-  .captcha-box input:focus {
-    outline: none;
-    border-color: #2563eb;
-    background: #ffffff;
-    box-shadow: 0 0 0 4px rgba(37, 99, 235, .15);
-  }
-
-  @media (max-width: 560px) {
-    .captcha-box { flex-direction: column; align-items: stretch; }
-    .captcha-box img {
-      height: 80px; min-width: 0; max-width: 100%;
-      align-self: center;
-    }
-    .captcha-box input { font-size: 24px; letter-spacing: 6px; }
-  }
-
-  .alert {
-    padding: 12px 14px;
-    border-radius: 9px;
-    font-size: 13.5px;
-    margin-top: 16px;
-    display: none;
-    line-height: 1.55;
-  }
-  .alert.error { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; display: block; }
-  .alert.info  { background: #eff6ff; color: #1e40af; border: 1px solid #bfdbfe; display: block; }
-  .alert.ok    { background: #f0fdf4; color: #166534; border: 1px solid #bbf7d0; display: block; }
-
-  .result-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 10px;
-    margin-top: 16px;
-  }
-  @media (max-width: 560px) { .result-grid { grid-template-columns: 1fr; } }
-
-  .result-grid .item {
-    padding: 11px 13px;
-    background: #f8fafc;
-    border-radius: 9px;
-    border: 1px solid #e2e8f0;
-    font-size: 13.5px;
-  }
-  .result-grid .item.full { grid-column: 1 / -1; }
-  .result-grid .k {
-    color: #64748b; font-size: 11.5px; text-transform: uppercase;
-    letter-spacing: .5px; font-weight: 600; margin-bottom: 3px;
-  }
-  .result-grid .v {
-    color: #0f172a; font-weight: 600; word-break: break-word; line-height: 1.4;
-  }
-
-  .imgs { display: flex; gap: 14px; margin-top: 18px; flex-wrap: wrap; }
-  .imgs img {
-    max-height: 120px; border-radius: 8px; background: #f1f5f9;
-    padding: 5px; border: 1px solid #e2e8f0;
-  }
-
-  .loader {
-    display: inline-block; width: 15px; height: 15px;
-    border: 2.5px solid #fff; border-top-color: transparent;
-    border-radius: 50%; animation: spin .8s linear infinite;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
-
-  details { margin-top: 20px; font-size: 12px; }
-  details summary { cursor: pointer; color: #64748b; user-select: none; }
-  details pre {
-    background: #0f172a; color: #e2e8f0; padding: 14px;
-    border-radius: 8px; overflow: auto; margin-top: 10px;
-    max-height: 320px; font-size: 11.5px; line-height: 1.5;
-  }
-
-  .captcha-hint {
-    font-size: 12px;
-    color: #64748b;
-    margin-top: -8px;
-    margin-bottom: 8px;
-    text-align: center;
-  }
+*{box-sizing:border-box}
+body{font-family:system-ui,-apple-system,"Segoe UI",Arial,sans-serif;background:linear-gradient(135deg,#eef2ff,#f0f4f8);margin:0;padding:24px 16px;min-height:100vh;color:#0f172a}
+.card{max-width:780px;margin:0 auto;background:#fff;border-radius:16px;padding:28px;box-shadow:0 8px 32px rgba(15,23,42,.08);border:1px solid #e2e8f0}
+h1{margin:0 0 6px;font-size:22px;color:#1e3a8a}
+p.sub{margin:0 0 24px;color:#64748b;font-size:13.5px}
+label{display:block;font-size:12.5px;font-weight:600;color:#334155;margin:14px 0 6px}
+input[type=text]{width:100%;padding:11px 14px;border:1.5px solid #cbd5e1;border-radius:9px;font-size:14px;background:#fff;color:#0f172a}
+input[type=text]:focus{outline:none;border-color:#2563eb;box-shadow:0 0 0 4px rgba(37,99,235,.12)}
+button{width:100%;margin-top:20px;padding:13px 16px;background:#2563eb;color:#fff;border:none;border-radius:9px;font-size:15px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:8px}
+button:disabled{background:#94a3b8;cursor:not-allowed;opacity:.85}
+button:hover:not(:disabled){background:#1d4ed8}
+button.secondary{background:#64748b;margin-top:10px}
+button.secondary:hover:not(:disabled){background:#475569}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:520px){.row{grid-template-columns:1fr}}
+.step{display:none;animation:fadeIn .28s ease-in}
+.step.active{display:block}
+@keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
+.captcha-box{display:flex;align-items:center;gap:18px;margin:20px 0;padding:18px;background:#fff;border:2px solid #cbd5e1;border-radius:12px}
+.captcha-box img{height:90px;width:auto;min-width:200px;max-width:340px;padding:8px 12px;background:#fff;border:2px solid #94a3b8;border-radius:8px;image-rendering:pixelated;flex-shrink:0;object-fit:contain}
+.captcha-box input{flex:1;min-width:0;font-size:28px;letter-spacing:8px;text-align:center;font-family:'Courier New',monospace;font-weight:700;text-transform:none;padding:16px 14px;border:2px solid #94a3b8;border-radius:10px;background:#f8fafc;color:#0f172a}
+.captcha-box input:focus{outline:none;border-color:#2563eb;background:#fff;box-shadow:0 0 0 4px rgba(37,99,235,.15)}
+@media(max-width:560px){.captcha-box{flex-direction:column;align-items:stretch}.captcha-box img{height:80px;min-width:0;max-width:100%;align-self:center}.captcha-box input{font-size:24px;letter-spacing:6px}}
+.alert{padding:12px 14px;border-radius:9px;font-size:13.5px;margin-top:16px;display:none;line-height:1.55;word-break:break-word}
+.alert.error{background:#fef2f2;color:#991b1b;border:1px solid #fecaca;display:block}
+.alert.info{background:#eff6ff;color:#1e40af;border:1px solid #bfdbfe;display:block}
+.alert.ok{background:#f0fdf4;color:#166534;border:1px solid #bbf7d0;display:block}
+.alert.warn{background:#fffbeb;color:#92400e;border:1px solid #fde68a;display:block}
+.result-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:16px}
+@media(max-width:560px){.result-grid{grid-template-columns:1fr}}
+.result-grid .item{padding:11px 13px;background:#f8fafc;border-radius:9px;border:1px solid #e2e8f0;font-size:13.5px}
+.result-grid .item.full{grid-column:1/-1}
+.result-grid .k{color:#64748b;font-size:11.5px;text-transform:uppercase;letter-spacing:.5px;font-weight:600;margin-bottom:3px}
+.result-grid .v{color:#0f172a;font-weight:600;word-break:break-word;line-height:1.4}
+.result-grid ul{margin:4px 0 0 0;padding-left:18px}
+.result-grid li{font-weight:600}
+.imgs{display:flex;gap:14px;margin-top:18px;flex-wrap:wrap}
+.imgs img{max-height:120px;border-radius:8px;background:#f1f5f9;padding:5px;border:1px solid #e2e8f0}
+.loader{display:inline-block;width:15px;height:15px;border:2.5px solid #fff;border-top-color:transparent;border-radius:50%;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+details{margin-top:20px;font-size:12px}
+details summary{cursor:pointer;color:#64748b;user-select:none}
+details pre{background:#0f172a;color:#e2e8f0;padding:14px;border-radius:8px;overflow:auto;margin-top:10px;max-height:320px;font-size:11.5px;line-height:1.5}
+.captcha-hint{font-size:12px;color:#64748b;margin-top:-8px;margin-bottom:8px;text-align:center}
+.toggle-row{display:flex;align-items:center;gap:8px;margin-top:14px;font-size:13px}
+.toggle-row input{width:auto}
+.ocr-badge{display:inline-block;padding:3px 8px;background:#dbeafe;color:#1e40af;border-radius:6px;font-size:11px;font-weight:600}
 </style>
 </head>
 <body>
-
 <div class="card">
+<h1>🚗 Sarathi DL Details — OCR + Manual</h1>
+<p class="sub">ddddocr से auto पढ़ेगा, गलत हो तो आप खुद टाइप करें</p>
 
-  <h1>🚗 Sarathi DL Details Fetcher</h1>
-  <p class="sub">कैप्चा खुद टाइप करें — कोई OCR नहीं, 100% भरोसेमंद</p>
-
-  <!-- ============== STEP 1 ============== -->
-  <div class="step active" id="step1">
-    <label>Driving Licence Number</label>
-    <input id="dlno" placeholder="MH0220100024875" value="MH0220100024875"
-           autocomplete="off" spellcheck="false">
-
-    <div class="row">
-      <div>
-        <label>Date of Birth (DD-MM-YYYY)</label>
-        <input id="dob" placeholder="20-05-1982" value="20-05-1982"
-               autocomplete="off" spellcheck="false">
-      </div>
-      <div>
-        <label>State</label>
-        <input id="state" value="Bihar" autocomplete="off" spellcheck="false">
-      </div>
-    </div>
-
-    <div class="row">
-      <div>
-        <label>RTO Code (खाली छोड़ सकते हैं)</label>
-        <input id="rto_code" placeholder="BR-01"
-               autocomplete="off" spellcheck="false">
-      </div>
-      <div>
-        <label>RTO Name (optional)</label>
-        <input id="rto_name" placeholder="PHULWARI SHARIF, PATNA"
-               autocomplete="off" spellcheck="false">
-      </div>
-    </div>
-
-    <button id="btnGetCaptcha">
-      <span>Get Captcha</span>
-      <span>→</span>
-    </button>
-
-    <div class="alert" id="alert1"></div>
-  </div>
-
-  <!-- ============== STEP 2 ============== -->
-  <div class="step" id="step2">
-    <div class="alert info" id="alert2">
-      नीचे कैप्चा image में जो अक्षर दिख रहे हैं, वही टाइप करें।
-      <br><b>⚠️ छोटे-बड़े अक्षर का ध्यान रखें</b> — जैसा दिख रहा है वैसा ही टाइप करें।
-    </div>
-
-    <div class="captcha-box">
-      <img id="captchaImg" alt="captcha">
-      <input id="captchaInput"
-             placeholder="कैप्चा यहाँ"
-             maxlength="10"
-             autocomplete="off"
-             autocapitalize="off"
-             autocorrect="off"
-             spellcheck="false"
-             inputmode="text">
-    </div>
-
-    <div class="captcha-hint">
-      पढ़ने में दिक्कत हो तो <b>वापस</b> दबाकर नया कैप्चा लें
-    </div>
-
-    <button id="btnSubmit">
-      <span>Submit</span>
-      <span>→</span>
-    </button>
-
-    <button id="btnBack" class="secondary">← वापस / नया कैप्चा</button>
-
-    <div class="alert" id="alert2b"></div>
-  </div>
-
-  <!-- ============== STEP 3 ============== -->
-  <div class="step" id="step3">
-    <div class="alert ok" id="alert3">✅ DL details मिल गईं</div>
-
-    <div class="result-grid" id="resultGrid"></div>
-    <div class="imgs" id="imgs"></div>
-
-    <button id="btnNew" class="secondary">🔍 नया DL खोजें</button>
-  </div>
-
-  <details id="debugDetails" style="display:none;">
-    <summary>Debug output</summary>
-    <pre id="debugPre"></pre>
-  </details>
-
+<div class="step active" id="step1">
+<label>Driving Licence Number</label>
+<input type="text" id="dlno" value="MH0220100024875" autocomplete="off">
+<div class="row">
+<div><label>Date of Birth (DD-MM-YYYY)</label><input type="text" id="dob" value="20-05-1982" autocomplete="off"></div>
+<div><label>State (portal)</label><input type="text" id="state" value="Bihar" autocomplete="off"></div>
+</div>
+<div class="toggle-row">
+<input type="checkbox" id="useOcr" checked>
+<label for="useOcr" style="margin:0;cursor:pointer">मुफ्त OCR (ddddocr) से auto-भरें</label>
+</div>
+<button id="btnStart"><span>Start</span><span>→</span></button>
+<div class="alert" id="alert1"></div>
 </div>
 
+<div class="step" id="step2">
+<div class="alert info" id="ocrNote" style="display:none"></div>
+<div class="alert warn" id="manualNote" style="display:none">
+⚠️ OCR से कैप्चा पढ़ा नहीं जा सका — कृपया खुद टाइप करें।
+</div>
+
+<div class="captcha-box">
+<img id="captchaImg" alt="captcha">
+<input type="text" id="captchaInput" placeholder="कैप्चा यहाँ" maxlength="10"
+       autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false">
+</div>
+<div class="captcha-hint">पढ़ने में दिक्कत हो तो <b>वापस</b> दबाकर नया कैप्चा लें</div>
+<button id="btnSubmit"><span>Submit</span><span>→</span></button>
+<button id="btnRetryOcr" class="secondary">🤖 फिर से OCR करें</button>
+<button id="btnBack" class="secondary">← वापस / नया कैप्चा</button>
+<div class="alert" id="alert2b"></div>
+</div>
+
+<div class="step" id="step3">
+<div class="alert ok">✅ DL details मिल गईं</div>
+<div class="result-grid" id="resultGrid"></div>
+<div class="imgs" id="imgs"></div>
+<button id="btnNew" class="secondary">🔍 नया DL खोजें</button>
+</div>
+
+<details id="debugDetails" style="display:none;"><summary>Debug output</summary><pre id="debugPre"></pre></details>
+</div>
 <script>
-const $ = id => document.getElementById(id);
-const step1 = $("step1"), step2 = $("step2"), step3 = $("step3");
-const alert1 = $("alert1"), alert2b = $("alert2b");
+const $=id=>document.getElementById(id);
+const step1=$("step1"),step2=$("step2"),step3=$("step3");
+const alert1=$("alert1"),alert2b=$("alert2b"),ocrNote=$("ocrNote"),manualNote=$("manualNote");
+let currentSid=null, currentCaptchaB64="";
 
-let currentSid = null;
-let currentFormData = null;
+function show(s){[step1,step2,step3].forEach(x=>x.classList.remove("active"));s.classList.add("active");window.scrollTo({top:0,behavior:"smooth"});}
+function setAlert(el,msg,type){el.className="alert "+(type||"error");el.textContent=msg;el.style.display=msg?"block":"none";}
+function setLoading(btn,on,text){btn.disabled=on;if(on){if(!btn.dataset.old)btn.dataset.old=btn.innerHTML;btn.innerHTML='<span class="loader"></span><span>'+(text||"कृपया प्रतीक्षा करें...")+'</span>';}else{btn.innerHTML=btn.dataset.old||btn.innerHTML;btn.dataset.old="";}}
 
-function show(step) {
-  [step1, step2, step3].forEach(s => s.classList.remove("active"));
-  step.classList.add("active");
-  window.scrollTo({ top: 0, behavior: "smooth" });
-}
-
-function setAlert(el, msg, type) {
-  el.className = "alert " + (type || "error");
-  el.textContent = msg;
-  el.style.display = msg ? "block" : "none";
-}
-
-function setLoading(btn, on, text) {
-  btn.disabled = on;
-  if (on) {
-    if (!btn.dataset.oldHtml) btn.dataset.oldHtml = btn.innerHTML;
-    btn.innerHTML = '<span class="loader"></span><span>' + (text || "कृपया प्रतीक्षा करें...") + '</span>';
-  } else {
-    btn.innerHTML = btn.dataset.oldHtml || btn.innerHTML;
-    btn.dataset.oldHtml = "";
-  }
-}
-
-// ---------- STEP 1: Get Captcha ----------
-$("btnGetCaptcha").onclick = async () => {
-  setAlert(alert1, "");
-
-  const data = {
-    dlno:     $("dlno").value.trim().toUpperCase(),
-    dob:      $("dob").value.trim(),
-    state:    $("state").value.trim(),
-    rto_code: $("rto_code").value.trim(),
-    rto_name: $("rto_name").value.trim(),
+$("btnStart").onclick=async()=>{
+  setAlert(alert1,"");
+  const payload={
+    dlno:$("dlno").value.trim().toUpperCase(),
+    dob:$("dob").value.trim(),
+    state:$("state").value.trim(),
+    use_ocr:$("useOcr").checked?"1":"0",
   };
+  if(!payload.dlno||!payload.dob){setAlert(alert1,"DL number और DOB भरें","error");return;}
+  if(!/^\d{2}-\d{2}-\d{4}$/.test(payload.dob)){setAlert(alert1,"DOB format DD-MM-YYYY","error");return;}
 
-  if (!data.dlno || !data.dob) {
-    setAlert(alert1, "DL number और DOB दोनों भरें", "error");
-    return;
-  }
-  if (!/^\d{2}-\d{2}-\d{4}$/.test(data.dob)) {
-    setAlert(alert1, "DOB का format DD-MM-YYYY होना चाहिए (जैसे 20-05-1982)", "error");
-    return;
-  }
+  setLoading($("btnStart"),true,"कैप्चा ला रहे हैं...");
+  try{
+    const res=await fetch("/api/start",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(payload)});
+    const j=await res.json();
+    if(!j.success){setAlert(alert1,"❌ "+(j.error||"असफल"),"error");return;}
+    currentSid=j.sid;
+    currentCaptchaB64=j.captcha;
+    $("captchaImg").src="data:image/png;base64,"+j.captcha;
 
-  setLoading($("btnGetCaptcha"), true, "कैप्चा ला रहे हैं...");
+    const inp=$("captchaInput");
+    ocrNote.style.display="none"; manualNote.style.display="none";
 
-  try {
-    const res = await fetch("/api/start", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(data),
-    });
-    const j = await res.json();
+    if(j.ocr_available && j.ocr_text){
+      inp.value=j.ocr_text;
+      ocrNote.textContent="🤖 OCR ने पढ़ा: \""+j.ocr_text+"\" — गलत लगे तो बदल दें।";
+      ocrNote.style.display="block";
+    } else if(j.ocr_available){
+      manualNote.style.display="block";
+      inp.value="";
+    } else {
+      manualNote.style.display="block";
+      inp.value="";
+    }
+    inp.style.textTransform="none";
+    setAlert(alert2b,""); show(step2); setTimeout(()=>inp.focus(),150);
+  }catch(e){setAlert(alert1,"❌ "+e.message,"error");}
+  finally{setLoading($("btnStart"),false);}
+};
 
-    if (!j.success) {
-      setAlert(alert1, "❌ " + (j.error || "असफल"), "error");
+$("btnRetryOcr").onclick=async()=>{
+  if(!currentCaptchaB64){return;}
+  setLoading($("btnRetryOcr"),true,"OCR...");
+  try{
+    const res=await fetch("/api/retry_ocr",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({captcha_b64:currentCaptchaB64})});
+    const j=await res.json();
+    if(!j.success){setAlert(alert2b,"❌ "+(j.error||"OCR fail"),"error");return;}
+    $("captchaInput").value=j.text||"";
+    ocrNote.textContent="🤖 OCR (retry): \""+(j.text||"")+"\"";
+    ocrNote.style.display="block";
+    manualNote.style.display="none";
+  }catch(e){setAlert(alert2b,"❌ "+e.message,"error");}
+  finally{setLoading($("btnRetryOcr"),false);}
+};
+
+async function doSubmit(){
+  const captcha=$("captchaInput").value.trim();
+  if(!captcha){setAlert(alert2b,"कैप्चा टाइप करें","error");$("captchaInput").focus();return;}
+  setAlert(alert2b,"");
+  setLoading($("btnSubmit"),true,"जाँच कर रहे हैं...");
+  try{
+    const res=await fetch("/api/submit",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({sid:currentSid,captcha})});
+    const j=await res.json();
+    if(!j.success){
+      setAlert(alert2b,"❌ "+(j.error||"असफल"),"error");
+      $("debugDetails").style.display="block";
+      $("debugPre").textContent=JSON.stringify(j,null,2)+"\n\nDebug URL: /api/debug?sid="+currentSid;
       return;
     }
-
-    currentSid = j.sid;
-    currentFormData = data;
-
-    $("captchaImg").src = "data:image/png;base64," + j.captcha;
-
-    // ✅ input clear करें और ध्यान से टाइप करवाएँ
-    const inp = $("captchaInput");
-    inp.value = "";
-    inp.style.textTransform = "none";   // double safety
-    setAlert(alert2b, "");
-    show(step2);
-    setTimeout(() => inp.focus(), 150);
-  } catch (e) {
-    setAlert(alert1, "❌ " + e.message, "error");
-  } finally {
-    setLoading($("btnGetCaptcha"), false);
-  }
-};
-
-// ---------- STEP 2: Submit ----------
-async function doSubmit() {
-  const captcha = $("captchaInput").value.trim();
-  if (!captcha) {
-    setAlert(alert2b, "कैप्चा टाइप करें", "error");
-    $("captchaInput").focus();
-    return;
-  }
-
-  setAlert(alert2b, "");
-  setLoading($("btnSubmit"), true, "जाँच कर रहे हैं...");
-
-  try {
-    const res = await fetch("/api/submit", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sid: currentSid, captcha }),
-    });
-    const j = await res.json();
-
-    if (!j.success) {
-      const code = j.code || "";
-      setAlert(alert2b, "❌ " + (j.error || "असफल"), "error");
-
-      if (code === "captcha_invalid" || code === "session_expired") {
-        setTimeout(() => {
-          setAlert(alert1, "⚠️ कैप्चा गलत था — नया कैप्चा लें", "info");
-          show(step1);
-        }, 1400);
-      }
-
-      if (j.preview) {
-        $("debugDetails").style.display = "block";
-        $("debugPre").textContent = "preview:\n" + j.preview;
-      }
-      return;
-    }
-
-    renderResult(j);
-    show(step3);
-  } catch (e) {
-    setAlert(alert2b, "❌ " + e.message, "error");
-  } finally {
-    setLoading($("btnSubmit"), false);
-  }
+    renderResult(j); show(step3);
+  }catch(e){setAlert(alert2b,"❌ "+e.message,"error");}
+  finally{setLoading($("btnSubmit"),false);}
 }
+$("btnSubmit").onclick=doSubmit;
+$("captchaInput").addEventListener("keydown",e=>{if(e.key==="Enter"){e.preventDefault();doSubmit();}});
+$("btnBack").onclick=()=>{setAlert(alert1,"");setAlert(alert2b,"");show(step1);};
+$("btnNew").onclick=()=>{$("resultGrid").innerHTML="";$("imgs").innerHTML="";setAlert(alert1,"");show(step1);};
 
-$("btnSubmit").onclick = doSubmit;
-
-$("captchaInput").addEventListener("keydown", e => {
-  if (e.key === "Enter") {
-    e.preventDefault();
-    doSubmit();
-  }
-});
-
-// ---------- Back ----------
-$("btnBack").onclick = () => {
-  currentSid = null;
-  setAlert(alert2b, "");
-  setAlert(alert1, "");
-  show(step1);
-};
-
-// ---------- New ----------
-$("btnNew").onclick = () => {
-  currentSid = null;
-  $("resultGrid").innerHTML = "";
-  $("imgs").innerHTML = "";
-  setAlert(alert1, "");
-  show(step1);
-};
-
-// ---------- Render result ----------
-function renderResult(j) {
-  const fields = [
-    ["dlno",                "DL Number"],
-    ["name",                "Name"],
-    ["father_name",         "S/W/D of"],
-    ["dob",                 "Date of Birth"],
-    ["blood_group",         "Blood Group"],
-    ["category",            "Category"],
-    ["class_of_vehicles",   "Class of Vehicles"],
-    ["validity",            "Validity"],
-    ["last_endorsed_state", "State"],
-    ["last_endorsed_rto",   "RTO"],
-    ["present_address",     "Present Address", true],
-    ["badge_numbers",       "Badge Numbers"],
-  ];
-
-  const grid = $("resultGrid");
-  grid.innerHTML = "";
-
-  for (const [key, label, full] of fields) {
-    const v = j[key];
-    if (!v) continue;
-
-    const div = document.createElement("div");
-    div.className = "item" + (full ? " full" : "");
-    div.innerHTML =
-      '<div class="k">' + label + '</div>' +
-      '<div class="v">' + escapeHtml(v) + '</div>';
-    grid.appendChild(div);
-  }
-
-  const imgs = $("imgs");
-  imgs.innerHTML = "";
-  if (j.photo) {
-    const i = document.createElement("img");
-    i.src = j.photo;
-    i.alt = "photo";
-    imgs.appendChild(i);
-  }
-  if (j.signature) {
-    const i = document.createElement("img");
-    i.src = j.signature;
-    i.alt = "signature";
-    imgs.appendChild(i);
-  }
+function renderResult(j){
+  const grid=$("resultGrid");grid.innerHTML="";
+  const fields=[["dlno","DL Number"],["name","Name"],["father_name","S/W/D of"],["dob","Date of Birth"],["blood_group","Blood Group"],["category","Category"],["validity","Validity"],["last_endorsed_state","State"],["last_endorsed_rto","RTO"],["present_address","Present Address",true]];
+  for(const [k,label,full] of fields){const v=j[k];if(!v)continue;const div=document.createElement("div");div.className="item"+(full?" full":"");div.innerHTML=`<div class="k">${label}</div><div class="v">${escapeHtml(v)}</div>`;grid.appendChild(div);}
+  if(Array.isArray(j.class_of_vehicles)&&j.class_of_vehicles.length){const div=document.createElement("div");div.className="item full";let html='<div class="k">Class of Vehicles</div><ul>';for(const c of j.class_of_vehicles)html+=`<li>${escapeHtml(c.cov)} — ${escapeHtml(c.issue)}</li>`;html+='</ul>';div.innerHTML=html;grid.appendChild(div);}
+  if(Array.isArray(j.badge_numbers)&&j.badge_numbers.length){const div=document.createElement("div");div.className="item full";div.innerHTML=`<div class="k">Badge Numbers</div><div class="v">${j.badge_numbers.map(escapeHtml).join(", ")}</div>`;grid.appendChild(div);}
+  const imgs=$("imgs");imgs.innerHTML="";
+  if(j.photo){const i=document.createElement("img");i.src=j.photo;i.alt="photo";imgs.appendChild(i);}
+  if(j.signature){const i=document.createElement("img");i.src=j.signature;i.alt="signature";imgs.appendChild(i);}
 }
-
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, c => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;",
-    '"': "&quot;", "'": "&#39;",
-  }[c]));
-}
-
-window.addEventListener("load", () => {
-  setTimeout(() => $("dlno").focus(), 200);
-});
+function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
+window.addEventListener("load",()=>setTimeout(()=>$("dlno").focus(),200));
 </script>
 </body>
 </html>
