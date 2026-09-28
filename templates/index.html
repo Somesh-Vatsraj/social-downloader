@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="hi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sarathi DL Fetcher</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, Arial, sans-serif; background: #f5f7fa; margin: 0; padding: 20px; }
+  .card { max-width: 720px; margin: 0 auto; background: #fff; border-radius: 12px; padding: 24px; box-shadow: 0 2px 12px rgba(0,0,0,.08); }
+  h1 { margin: 0 0 8px; font-size: 20px; color: #1e3a8a; }
+  p.sub { margin: 0 0 20px; color: #64748b; font-size: 14px; }
+  label { display: block; font-size: 13px; font-weight: 600; color: #334155; margin: 12px 0 4px; }
+  input { width: 100%; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 14px; }
+  button { width: 100%; margin-top: 20px; padding: 12px; background: #2563eb; color: #fff; border: none; border-radius: 8px; font-size: 15px; font-weight: 600; cursor: pointer; }
+  button:disabled { background: #94a3b8; cursor: not-allowed; }
+  pre { background: #0f172a; color: #e2e8f0; padding: 16px; border-radius: 8px; overflow: auto; font-size: 13px; max-height: 400px; margin-top: 20px; }
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .photo { display: flex; gap: 12px; margin-top: 12px; }
+  .photo img { max-height: 90px; border-radius: 6px; background: #f1f5f9; padding: 4px; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>🚗 Sarathi DL Details Fetcher</h1>
+  <p class="sub">मुफ्त OCR (ddddocr) — कोई API key नहीं चाहिए</p>
+
+  <label>Driving Licence Number</label>
+  <input id="dlno" placeholder="MH0220100024875" value="MH0220100024875">
+
+  <div class="row">
+    <div>
+      <label>Date of Birth (DD-MM-YYYY)</label>
+      <input id="dob" placeholder="20-05-1982" value="20-05-1982">
+    </div>
+    <div>
+      <label>State</label>
+      <input id="state" value="Bihar">
+    </div>
+  </div>
+
+  <div class="row">
+    <div>
+      <label>RTO Code</label>
+      <input id="rto_code" value="BR-01">
+    </div>
+    <div>
+      <label>RTO Name</label>
+      <input id="rto_name" value="RTO,BORIVALI">
+    </div>
+  </div>
+
+  <button id="go">Fetch DL Details</button>
+  <pre id="out">Ready…</pre>
+  <div class="photo" id="imgs"></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const go = $("go"), out = $("out"), imgs = $("imgs");
+
+go.onclick = async () => {
+  go.disabled = true;
+  out.textContent = "⏳ OCR + fetch चल रहा है… (10-60 sec लग सकते हैं)";
+  imgs.innerHTML = "";
+
+  const params = new URLSearchParams({
+    dlno: $("dlno").value.trim(),
+    dob: $("dob").value.trim(),
+    state: $("state").value.trim(),
+    rto_code: $("rto_code").value.trim(),
+    rto_name: $("rto_name").value.trim(),
+    st_name: $("state").value.trim(),
+  });
+
+  try {
+    const res = await fetch("/api/dl?" + params);
+    const data = await res.json();
+    out.textContent = JSON.stringify(data, null, 2);
+    if (data.photo)     imgs.innerHTML += `<img src="${data.photo}"     alt="Photo">`;
+    if (data.signature) imgs.innerHTML += `<img src="${data.signature}" alt="Sign">`;
+  } catch (e) {
+    out.textContent = "❌ Error: " + e.message;
+  } finally {
+    go.disabled = false;
+  }
+};
+</script>
+</body>
+</html>
