@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import sys
 from typing import Any
 
 import requests
@@ -9,7 +10,6 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-# ------------------------------------------------------------------ config
 AES_KEY_B64 = os.environ.get(
     "ECI_AES_KEY_B64",
     "e855n97lc4tcPkj7WWsi38yNWpalLBLZzQdkqHWYbZ0=",
@@ -48,9 +48,15 @@ HEADERS_COMMON = {
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET", os.urandom(32))
+DEBUG = os.environ.get("ECI_DEBUG", "1") == "1"
 
 
-# ------------------------------------------------------------------ crypto
+def dbg(*a):
+    if DEBUG:
+        print("[dbg]", *a, file=sys.stderr, flush=True)
+
+
+# ---------------- crypto ----------------
 def _fixed_key() -> bytes:
     return base64.b64decode(AES_KEY_B64)
 
@@ -76,6 +82,7 @@ def encrypt_payload(data: dict) -> dict:
     aes_key = os.urandom(32)
     iv = os.urandom(12)
     plaintext = json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode()
+    dbg("PLAINTEXT:", plaintext.decode())
     ct = AESGCM(aes_key).encrypt(iv, plaintext, None)
     enc_key = _public_key().encrypt(
         aes_key,
@@ -92,38 +99,67 @@ def encrypt_payload(data: dict) -> dict:
     }
 
 
-# ------------------------------------------------------------------ ECI calls
+# ---------------- ECI ----------------
 def fetch_captcha() -> dict:
     r = requests.get(CAPTCHA_URL, headers=HEADERS_COMMON, timeout=30)
     r.raise_for_status()
     blob = r.json().get("data")
     if not blob:
-        raise RuntimeError(f"CAPTCHA response invalid: {r.text[:200]}")
+        raise RuntimeError(f"CAPTCHA response invalid: {r.text[:300]}")
     data = decrypt_fixed(blob)
     return {"id": data.get("id", ""), "img_b64": data.get("captcha", "")}
 
 
-def search_epic(epic: str, captcha_text: str, captcha_id: str) -> Any:
-    payload = {
-        "epicNumber": epic,
-        "captcha": captcha_text,
-        "captchaId": captcha_id,
-    }
+def _post_search(payload: dict):
     enc = encrypt_payload(payload)
-    r = requests.post(
-        SEARCH_URL,
-        headers={**HEADERS_COMMON, "Content-Type": "application/json"},
-        data=json.dumps(enc),
-        timeout=30,
-    )
-    if r.status_code >= 400:
-        raise RuntimeError(f"Search HTTP {r.status_code}: {r.text[:300]}")
-    j = r.json()
-    blob = j.get("data")
-    return decrypt_fixed(blob) if blob else j
+    headers = {**HEADERS_COMMON, "Content-Type": "application/json"}
+    r = requests.post(SEARCH_URL, headers=headers, data=json.dumps(enc), timeout=30)
+    dbg(f"HTTP {r.status_code}")
+    dbg("RESP HEADERS:", dict(r.headers))
+    dbg("RESP BODY:", r.text[:1000])
+    return r
 
 
-# ------------------------------------------------------------------ routes
+def search_epic(epic: str, captcha_text: str, captcha_id: str) -> Any:
+    epic = epic.strip().upper()
+    captcha_text = captcha_text.strip().upper()
+
+    shapes = [
+        {"epicNumber": epic, "captcha": captcha_text, "captchaId": captcha_id},
+        {"epicNumber": epic, "captcha": captcha_text, "id": captcha_id},
+        {"epic": epic, "captcha": captcha_text, "captchaId": captcha_id},
+        {"epic": epic, "captcha": captcha_text, "id": captcha_id},
+        {"epicNo": epic, "captcha": captcha_text, "captchaId": captcha_id},
+        {"epicNumber": epic, "captchaText": captcha_text, "captchaId": captcha_id},
+        {"epicNumber": epic, "captcha": captcha_text, "captchaId": captcha_id,
+         "isPortal": True},
+        {"epicNumber": epic, "captcha": captcha_text, "captchaId": captcha_id,
+         "isPortal": True, "stateCd": "", "districtCd": ""},
+    ]
+
+    last_err = None
+    for i, p in enumerate(shapes):
+        dbg(f"--- Attempt #{i}: {list(p.keys())} ---")
+        try:
+            r = _post_search(p)
+        except Exception as e:
+            last_err = str(e)
+            continue
+        if r.status_code == 200:
+            try:
+                j = r.json()
+            except Exception:
+                return r.text
+            blob = j.get("data")
+            return decrypt_fixed(blob) if blob else j
+        last_err = f"HTTP {r.status_code}: {r.text[:300]}"
+        if r.status_code in (400, 422):
+            continue
+        break
+    raise RuntimeError(f"All attempts failed. Last: {last_err}")
+
+
+# ---------------- routes ----------------
 @app.route("/", methods=["GET", "POST"])
 def index():
     error = None
@@ -133,9 +169,8 @@ def index():
     epic_value = request.form.get("epic", "")
 
     if request.method == "POST":
-        epic = (request.form.get("epic") or "").strip()
-        captcha_text = (request.form.get("captcha_text") or "").strip()
-
+        epic = (request.form.get("epic") or "").strip().upper()
+        captcha_text = (request.form.get("captcha_text") or "").strip().upper()
         if not epic or not captcha_text:
             error = "EPIC aur CAPTCHA dono bharo."
         else:
@@ -144,7 +179,6 @@ def index():
             except Exception as e:
                 error = str(e)
 
-    # Naya CAPTCHA sirf GET par ya error ke baad fetch karo
     if request.method == "GET" or error or result is not None:
         try:
             cap = fetch_captcha()
@@ -155,10 +189,8 @@ def index():
 
     return render_template(
         "index.html",
-        error=error,
-        result=result,
-        captcha_id=captcha_id,
-        captcha_img=captcha_img,
+        error=error, result=result,
+        captcha_id=captcha_id, captcha_img=captcha_img,
         epic_value=epic_value,
     )
 
@@ -169,5 +201,4 @@ def healthz():
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=DEBUG)
