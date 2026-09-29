@@ -30,15 +30,14 @@
   <label>EPIC Number</label>
   <input type="text" name="epic" required value="{{ epic_value }}" placeholder="e.g. ABC1234567">
 
-  <label>CAPTCHA</label>
+  <label>CAPTCHA (case-sensitive, uppercase)</label>
   {% if captcha_img %}
     <img class="captcha" width="220"
          src="data:image/jpeg;base64,{{ captcha_img }}" alt="captcha">
   {% else %}
     <p><em>CAPTCHA load nahi hua — reload karo.</em></p>
   {% endif %}
-  <input type="text" name="captcha_text" required placeholder="CAPTCHA text daalo">
-  <div class="hint">Image manually padho, phir type karo.</div>
+  <input type="text" name="captcha_text" required placeholder="CAPTCHA text daalo" style="text-transform:uppercase">
 
   <button type="submit">Search</button>
 </form>
