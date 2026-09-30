@@ -1,28 +1,23 @@
-FROM python:3.12-slim
+FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PORT=8000
 
+# system deps for ddddocr / onnxruntime
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libglib2.0-0 libsm6 libxext6 libxrender1 libgomp1 \
+        libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
-# Dependencies pehle (layer caching ke liye)
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --upgrade pip && pip install -r requirements.txt
 
-# App code
-COPY app.py .
-COPY templates ./templates
-
-# Non-root user
-RUN useradd -m -u 10001 appuser && chown -R appuser:appuser /app
-USER appuser
+COPY . .
 
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-  CMD python -c "import urllib.request,os; \
-urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"PORT\",8000)}/healthz').read()" || exit 1
-
-CMD ["sh", "-c", "gunicorn app:app --bind 0.0.0.0:${PORT} --workers 2 --threads 2 --timeout 60 --access-logfile - --error-logfile -"]
+CMD ["sh", "-c", "uvicorn app:app --host 0.0.0.0 --port ${PORT}"]
