@@ -1,51 +1,99 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>ECI Voter Search</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-  body{font-family:system-ui,Arial,sans-serif;max-width:720px;margin:24px auto;padding:0 16px;background:#fafafa}
-  h1{font-size:20px}
-  fieldset{border:1px solid #ddd;background:#fff;padding:16px;border-radius:10px}
-  label{display:block;margin:12px 0 4px;font-weight:600;font-size:14px}
-  input[type=text]{padding:10px;width:100%;box-sizing:border-box;font-size:16px;border:1px solid #ccc;border-radius:6px}
-  button{padding:10px 20px;font-size:16px;margin-top:14px;cursor:pointer;border:0;background:#2563eb;color:#fff;border-radius:6px}
-  img.captcha{border:1px solid #aaa;background:#fff;display:block;margin:8px 0}
-  .err{background:#fee;color:#a00;padding:10px;border-radius:6px;margin:12px 0;font-size:14px}
-  pre{background:#0f172a;color:#e2e8f0;padding:14px;border-radius:8px;overflow:auto;font-size:12px}
-  .hint{font-size:12px;color:#666;margin-top:4px}
-</style>
-</head>
-<body>
-<h1>ECI Voter Search (by EPIC)</h1>
+{% extends "base.html" %}
 
-{% if error %}<div class="err">{{ error }}</div>{% endif %}
+{% block title %}Search — ECI{% endblock %}
 
-<fieldset>
-<form method="post" autocomplete="off">
-  <input type="hidden" name="captcha_id"  value="{{ captcha_id }}">
-  <input type="hidden" name="captcha_img" value="{{ captcha_img }}">
+{% block content %}
+<form id="search-form" class="card">
+  <label for="epic">EPIC Number</label>
+  <input
+    type="text"
+    id="epic"
+    name="epic"
+    placeholder="e.g. ABC1234567"
+    autocomplete="off"
+    required
+    maxlength="20"
+  />
 
-  <label>EPIC Number</label>
-  <input type="text" name="epic" required value="{{ epic_value }}" placeholder="e.g. ABC1234567">
+  <label for="attempts">Max captcha attempts</label>
+  <select id="attempts" name="attempts">
+    <option value="3">3</option>
+    <option value="5" selected>5</option>
+    <option value="10">10</option>
+  </select>
 
-  <label>CAPTCHA (case-sensitive, uppercase)</label>
-  {% if captcha_img %}
-    <img class="captcha" width="220"
-         src="data:image/jpeg;base64,{{ captcha_img }}" alt="captcha">
-  {% else %}
-    <p><em>CAPTCHA load nahi hua — reload karo.</em></p>
-  {% endif %}
-  <input type="text" name="captcha_text" required placeholder="CAPTCHA text daalo" style="text-transform:uppercase">
-
-  <button type="submit">Search</button>
+  <button type="submit" id="submit-btn">
+    <span class="btn-text">Search</span>
+    <span class="spinner" hidden></span>
+  </button>
 </form>
-</fieldset>
 
-{% if result is not none %}
-  <h3>Result</h3>
-  <pre>{{ result | tojson(indent=2) }}</pre>
-{% endif %}
-</body>
-</html>
+<div id="status" class="status" hidden></div>
+
+<div id="result-box" class="card result" hidden></div>
+
+<script>
+const form = document.getElementById("search-form");
+const btn = document.getElementById("submit-btn");
+const statusEl = document.getElementById("status");
+const resultBox = document.getElementById("result-box");
+
+function setLoading(on) {
+  btn.disabled = on;
+  btn.querySelector(".btn-text").hidden = on;
+  btn.querySelector(".spinner").hidden = !on;
+  if (on) {
+    statusEl.hidden = false;
+    statusEl.textContent = "Fetching captcha, solving OCR, encrypting… (can take 20–40s)";
+    resultBox.hidden = true;
+  }
+}
+
+form.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const epic = document.getElementById("epic").value.trim();
+  const attempts = parseInt(document.getElementById("attempts").value, 10);
+  if (!epic) return;
+
+  setLoading(true);
+
+  try {
+    const res = await fetch("/search", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ epic, attempts })
+    });
+    const data = await res.json();
+
+    statusEl.hidden = true;
+    resultBox.hidden = false;
+
+    if (!res.ok) {
+      resultBox.innerHTML =
+        '<h2 class="error">Error</h2><pre>' +
+        JSON.stringify(data, null, 2) +
+        "</pre>";
+      return;
+    }
+
+    const r = data.result || {};
+    const captcha = data.captcha_text || "-";
+    const used = data.attempts || "-";
+
+    resultBox.innerHTML = `
+      <h2>Result for <code>${epic}</code></h2>
+      <p class="meta">
+        Captcha OCR: <b>${captcha}</b> &nbsp;|&nbsp; Attempts used: <b>${used}</b>
+      </p>
+      <pre>${JSON.stringify(r, null, 2)}</pre>
+    `;
+  } catch (err) {
+    statusEl.hidden = true;
+    resultBox.hidden = false;
+    resultBox.innerHTML = '<h2 class="error">Network error</h2><pre>' + err + "</pre>";
+  } finally {
+    setLoading(false);
+  }
+});
+</script>
+{% endblock %}
