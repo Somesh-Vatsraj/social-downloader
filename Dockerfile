@@ -5,10 +5,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PORT=8000
 
-# system deps for ddddocr / onnxruntime
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libglib2.0-0 libsm6 libxext6 libxrender1 libgomp1 \
-        libgl1 libglib2.0-0 \
+        libglib2.0-0 libsm6 libxext6 libxrender1 libgomp1 libgl1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
