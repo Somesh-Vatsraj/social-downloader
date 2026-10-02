@@ -1,9 +1,9 @@
 <?php
 /**
  * Self-Hosted YouTube API
- * - yt-dlp based extraction
- * - Cookies support (Render pe zaroori)
- * - Proxy support (optional)
+ * - yt-dlp based
+ * - Cookies support (YTDLP_COOKIES env var)
+ * - Proxy support (YTDLP_PROXY env var)
  * - Debug mode: /?debug=1
  */
 
@@ -20,34 +20,31 @@ if (isset($_GET['debug'])) {
     echo "OS: " . PHP_OS . "\n";
     echo "Working dir: " . getcwd() . "\n\n";
 
-    echo "=== yt-dlp path check ===\n";
     $bin = '/usr/local/bin/yt-dlp';
+
+    echo "=== yt-dlp check ===\n";
     echo "Exists: " . (file_exists($bin) ? 'YES' : 'NO') . "\n";
-    echo "Executable: " . (is_executable($bin) ? 'YES' : 'NO') . "\n\n";
+    echo "Executable: " . (is_executable($bin) ? 'YES' : 'NO') . "\n";
+    echo "Version: " . trim(shell_exec($bin . ' --version 2>&1')) . "\n\n";
 
-    echo "=== yt-dlp version ===\n";
-    echo shell_exec($bin . ' --version 2>&1') . "\n";
-
-    echo "=== cookies check ===\n";
-    if (file_exists('/app/cookies.txt')) {
-        echo "cookies.txt exists (" . filesize('/app/cookies.txt') . " bytes)\n";
-    } elseif (file_exists('/tmp/cookies.txt')) {
-        echo "/tmp/cookies.txt exists\n";
-    } else {
-        echo "No cookies file found\n";
-    }
-
-    if (getenv('YTDLP_COOKIES')) {
-        echo "YTDLP_COOKIES env: SET (length " . strlen(getenv('YTDLP_COOKIES')) . ")\n";
+    echo "=== Cookies check ===\n";
+    $cookiesEnv = getenv('YTDLP_COOKIES');
+    if ($cookiesEnv) {
+        echo "YTDLP_COOKIES env: SET (" . strlen($cookiesEnv) . " chars)\n";
     } else {
         echo "YTDLP_COOKIES env: NOT SET\n";
     }
 
-    if (getenv('YTDLP_PROXY')) {
-        echo "YTDLP_PROXY env: SET\n";
-    } else {
-        echo "YTDLP_PROXY env: NOT SET\n";
+    if (file_exists('/app/cookies.txt')) {
+        echo "/app/cookies.txt exists (" . filesize('/app/cookies.txt') . " bytes)\n";
     }
+    if (file_exists('/tmp/cookies.txt')) {
+        echo "/tmp/cookies.txt exists (" . filesize('/tmp/cookies.txt') . " bytes)\n";
+    }
+
+    echo "\n=== Proxy check ===\n";
+    $proxyEnv = getenv('YTDLP_PROXY');
+    echo "YTDLP_PROXY env: " . ($proxyEnv ? 'SET' : 'NOT SET') . "\n";
 
     echo "\n=== yt-dlp verbose test ===\n";
     $testUrl = $_GET['url'] ?? 'https://youtu.be/2aMVhBNhAgQ';
@@ -59,20 +56,22 @@ if (isset($_GET['debug'])) {
         '--no-playlist',
         '--skip-download',
         '--no-check-certificate',
+        '--extractor-args', escapeshellarg('youtube:player_client=ios,web_safari,tv_embedded,android'),
         '-v',
     ];
 
-    if (file_exists('/app/cookies.txt')) {
-        $args[] = '--cookies';
-        $args[] = '/app/cookies.txt';
-    } elseif (file_exists('/tmp/cookies.txt')) {
+    if ($cookiesEnv) {
+        file_put_contents('/tmp/cookies.txt', $cookiesEnv);
         $args[] = '--cookies';
         $args[] = '/tmp/cookies.txt';
+    } elseif (file_exists('/app/cookies.txt') && filesize('/app/cookies.txt') > 0) {
+        $args[] = '--cookies';
+        $args[] = '/app/cookies.txt';
     }
 
-    if (getenv('YTDLP_PROXY')) {
+    if ($proxyEnv) {
         $args[] = '--proxy';
-        $args[] = getenv('YTDLP_PROXY');
+        $args[] = escapeshellarg($proxyEnv);
     }
 
     $args[] = escapeshellarg($testUrl);
@@ -104,7 +103,6 @@ if (!filter_var($target_link, FILTER_VALIDATE_URL)) {
     exit;
 }
 
-// Only YouTube
 $host = strtolower(parse_url($target_link, PHP_URL_HOST) ?? '');
 $allowed = ['youtube.com', 'www.youtube.com', 'youtu.be', 'm.youtube.com', 'music.youtube.com'];
 if (!in_array($host, $allowed)) {
@@ -118,7 +116,7 @@ if (!in_array($host, $allowed)) {
 // ============================================================
 $YTDLP_BIN = '/usr/local/bin/yt-dlp';
 $CACHE_DIR = sys_get_temp_dir();
-$CACHE_TTL = 600;      // 10 min
+$CACHE_TTL = 600;
 $TIMEOUT   = 60;
 
 if (!file_exists($YTDLP_BIN)) {
@@ -144,21 +142,14 @@ if (file_exists($cacheFile) && (time() - filemtime($cacheFile)) < $CACHE_TTL) {
 // COOKIES SETUP
 // ============================================================
 $cookiePath = null;
-
-// Priority 1: env variable
 $cookiesEnv = getenv('YTDLP_COOKIES');
+
 if ($cookiesEnv) {
     $cookiePath = '/tmp/cookies.txt';
     file_put_contents($cookiePath, $cookiesEnv);
-}
-
-// Priority 2: /app/cookies.txt
-if (!$cookiePath && file_exists('/app/cookies.txt') && filesize('/app/cookies.txt') > 0) {
+} elseif (file_exists('/app/cookies.txt') && filesize('/app/cookies.txt') > 0) {
     $cookiePath = '/app/cookies.txt';
-}
-
-// Priority 3: /tmp/cookies.txt already
-if (!$cookiePath && file_exists('/tmp/cookies.txt') && filesize('/tmp/cookies.txt') > 0) {
+} elseif (file_exists('/tmp/cookies.txt') && filesize('/tmp/cookies.txt') > 0) {
     $cookiePath = '/tmp/cookies.txt';
 }
 
@@ -254,14 +245,14 @@ foreach (array_reverse($lines) as $line) {
 if ($jsonLine === null) {
     http_response_code(500);
     echo json_encode([
-        'success'   => false,
-        'error'     => 'No JSON from yt-dlp',
-        'cmd'       => $cmd,
+        'success'      => false,
+        'error'        => 'No JSON from yt-dlp',
+        'cmd'          => $cmd,
         'cookies_used' => $cookiePath ? 'YES' : 'NO',
         'proxy_used'   => $proxy ? 'YES' : 'NO',
-        'stderr'    => substr($stderr, 0, 1500),
-        'stdout'    => substr($output, 0, 500),
-        'hint'      => 'Agar "Sign in to confirm you\'re not a bot" aaya hai, to YTDLP_COOKIES env variable set karo Render me',
+        'stderr'       => substr($stderr, 0, 1500),
+        'stdout'       => substr($output, 0, 500),
+        'hint'         => 'Render me YTDLP_COOKIES env variable set karo',
     ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
     exit;
 }
@@ -271,7 +262,7 @@ if (!is_array($yt)) {
     http_response_code(500);
     echo json_encode([
         'success' => false,
-        'error'   => 'Invalid JSON from yt-dlp',
+        'error'   => 'Invalid JSON',
         'raw'     => substr($jsonLine, 0, 500),
     ], JSON_PRETTY_PRINT);
     exit;
@@ -283,7 +274,6 @@ if (!is_array($yt)) {
 $media = [];
 $duration = $yt['duration'] ?? 0;
 
-// Thumbnail
 if (!empty($yt['thumbnail'])) {
     $media[] = [
         'type'      => 'photo',
@@ -299,7 +289,6 @@ if (!empty($yt['thumbnail'])) {
     ];
 }
 
-// Formats
 if (!empty($yt['formats']) && is_array($yt['formats'])) {
     foreach ($yt['formats'] as $f) {
         $url = $f['url'] ?? '';
@@ -355,7 +344,7 @@ foreach ($media as $item) {
 }
 $media = array_values($unique);
 
-// Sort: photo -> video (high->low) -> audio (high->low)
+// Sort
 $typeOrder = ['photo' => 1, 'video' => 2, 'audio' => 3];
 usort($media, function ($a, $b) use ($typeOrder) {
     $aO = $typeOrder[strtolower($a['type'] ?? '')] ?? 99;
