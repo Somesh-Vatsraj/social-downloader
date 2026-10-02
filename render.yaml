@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: youtube-api
+    env: docker
+    plan: free
+    region: singapore   # ya oregon / frankfurt
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: PHP_MEMORY_LIMIT
+        value: 256M
