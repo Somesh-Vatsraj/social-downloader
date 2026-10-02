@@ -1,6 +1,6 @@
 FROM php:8.2-cli-alpine
 
-# System deps + Python (yt-dlp ke liye)
+# System deps + Python + ffmpeg
 RUN apk add --no-cache \
     python3 \
     py3-pip \
@@ -8,17 +8,19 @@ RUN apk add --no-cache \
     curl \
     bash \
     ca-certificates \
+    procps \
     && rm -rf /var/cache/apk/*
 
 # yt-dlp install
 RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
     -o /usr/local/bin/yt-dlp \
-    && chmod +x /usr/local/bin/yt-dlp
+    && chmod +x /usr/local/bin/yt-dlp \
+    && yt-dlp --version
 
-# PHP extensions
+# PHP extensions — SIRF YAHI ZAROORI HAIN
 RUN docker-php-ext-install -j$(nproc) \
-    && apk add --no-cache --virtual .build-deps $PHPIZE_DEPS \
-    && apk del .build-deps
+    pcntl \
+    posix
 
 # Workdir
 WORKDIR /app
@@ -29,5 +31,5 @@ COPY . /app
 # Render PORT env use karega
 EXPOSE 8080
 
-# PHP built-in server (production ke liye theek hai chhoti API ke liye)
+# PHP built-in server
 CMD php -S 0.0.0.0:${PORT:-8080} router.php
