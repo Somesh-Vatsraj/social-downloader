@@ -1,11 +1,13 @@
 services:
   - type: web
-    name: youtube-api
+    name: social-downloader
     env: docker
     plan: free
-    region: singapore   # ya oregon / frankfurt
+    region: singapore
     dockerfilePath: ./Dockerfile
     healthCheckPath: /health
     envVars:
-      - key: PHP_MEMORY_LIMIT
-        value: 256M
+      - key: YTDLP_COOKIES
+        sync: false
+      - key: YTDLP_PROXY
+        sync: false
