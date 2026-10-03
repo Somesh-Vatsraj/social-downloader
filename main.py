@@ -9,7 +9,6 @@ import yt_dlp
 app = FastAPI(title="Railway yt-dlp API")
 
 
-# ---------- yt-dlp options ----------
 def get_ydl_opts(download=False, output_dir=None, format_type="mp4"):
     opts = {
         "quiet": True,
@@ -18,29 +17,31 @@ def get_ydl_opts(download=False, output_dir=None, format_type="mp4"):
         "noplaylist": True,
         "retries": 5,
         "fragment_retries": 5,
+        # Less-tracked player clients that hit different YouTube API endpoints
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "tv", "mweb"],
-                "player_skip": ["webpage"],
+                "player_client": ["tv", "mweb", "web_safari", "android_vr"],
+                "player_skip": ["webpage", "configs"],
             }
         },
+        # Safari UA to match the web_safari client expectations
         "http_headers": {
             "User-Agent": (
-                "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) "
+                "Version/17.0 Safari/605.1.15"
             )
         },
     }
 
-    # Cookies (critical for datacenter IPs)
+    # Cookies (still helpful as a secondary signal)
     cookie_file = os.getenv("YTDLP_COOKIE_FILE", "/app/cookies.txt")
     if os.path.exists(cookie_file):
         opts["cookiefile"] = cookie_file
 
-    # POT provider (if running as sidecar)
-    pot_provider = os.getenv("YTDLP_POT_PROVIDER")
-    if pot_provider:
-        opts["extractor_args"]["youtube"]["po_token"] = [f"web+{pot_provider}"]
+    # POT provider (the critical fix)
+    pot_provider = os.getenv("YTDLP_POT_PROVIDER", "http://bgutil-provider:4416")
+    opts["extractor_args"]["youtube"]["po_token"] = [f"web+{pot_provider}"]
 
     if download:
         opts["outtmpl"] = os.path.join(output_dir, "%(title)s.%(ext)s")
@@ -61,7 +62,6 @@ def get_ydl_opts(download=False, output_dir=None, format_type="mp4"):
     return opts
 
 
-# ---------- JSON info builder ----------
 def format_to_media(fmt):
     vcodec = fmt.get("vcodec")
     acodec = fmt.get("acodec")
@@ -141,7 +141,6 @@ def build_response(info):
     }
 
 
-# ---------- Endpoints ----------
 @app.get("/info")
 async def get_info(url: str = Query(..., description="Video URL")):
     try:
