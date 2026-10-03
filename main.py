@@ -16,17 +16,31 @@ def get_ydl_opts(download=False, output_dir=None, format_type="mp4"):
         "no_warnings": True,
         "skip_download": not download,
         "noplaylist": True,
+        "retries": 5,
+        "fragment_retries": 5,
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "tv", "mweb"],
+                "player_skip": ["webpage"],
+            }
+        },
         "http_headers": {
             "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
+                "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
             )
         },
     }
-    cookie_file = os.getenv("YTDLP_COOKIE_FILE", "cookies.txt")
+
+    # Cookies (critical for datacenter IPs)
+    cookie_file = os.getenv("YTDLP_COOKIE_FILE", "/app/cookies.txt")
     if os.path.exists(cookie_file):
         opts["cookiefile"] = cookie_file
+
+    # POT provider (if running as sidecar)
+    pot_provider = os.getenv("YTDLP_POT_PROVIDER")
+    if pot_provider:
+        opts["extractor_args"]["youtube"]["po_token"] = [f"web+{pot_provider}"]
 
     if download:
         opts["outtmpl"] = os.path.join(output_dir, "%(title)s.%(ext)s")
@@ -160,7 +174,7 @@ async def get_info(url: str = Query(..., description="Video URL")):
 
 class DownloadRequest(BaseModel):
     url: str
-    format: str = "mp4"  # "mp4" or "mp3"
+    format: str = "mp4"
 
 
 def cleanup_temp_dir(temp_dir: str):
@@ -198,7 +212,7 @@ def root():
         "message": "Railway yt-dlp API",
         "endpoints": {
             "info": "GET /info?url=...",
-            "download": "POST /download {url, format}",
+            "download": "POST /download",
         },
     }
 
