@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-# Install ffmpeg for audio extraction and merging
+# Install FFmpeg for audio extraction and format merging
 RUN apt-get update && apt-get install -y ffmpeg && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -10,4 +10,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Railway provides a PORT environment variable
+CMD uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}
