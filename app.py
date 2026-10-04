@@ -3,11 +3,11 @@ import uuid
 import shutil
 import subprocess
 import time
+import requests
 from pathlib import Path
 
 import gradio as gr
 from faster_whisper import WhisperModel
-from deep_translator import GoogleTranslator
 from gtts import gTTS
 
 
@@ -18,10 +18,7 @@ from gtts import gTTS
 BASE_DIR = Path("/tmp/chinese_hindi")
 OUTPUT_DIR = BASE_DIR / "outputs"
 
-OUTPUT_DIR.mkdir(
-    parents=True,
-    exist_ok=True
-)
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 WHISPER_MODEL_NAME = "tiny"
 
@@ -29,7 +26,7 @@ whisper_model = None
 
 
 # ============================================================
-# WHISPER LAZY LOADING
+# WHISPER MODEL
 # ============================================================
 
 def get_whisper_model():
@@ -101,19 +98,14 @@ def get_video_duration(video):
         str(video)
     ])
 
-    return float(
-        result.stdout.strip()
-    )
+    return float(result.stdout.strip())
 
 
 # ============================================================
 # EXTRACT AUDIO
 # ============================================================
 
-def extract_audio(
-    video,
-    audio
-):
+def extract_audio(video, audio):
 
     run_command([
         "ffmpeg",
@@ -132,34 +124,22 @@ def extract_audio(
 
 
 # ============================================================
-# CHINESE SPEECH RECOGNITION
+# CHINESE TRANSCRIPTION
 # ============================================================
 
-def transcribe_chinese(
-    audio,
-    progress
-):
+def transcribe_chinese(audio, progress):
 
     model = get_whisper_model()
 
-    print(
-        "Starting Chinese transcription..."
-    )
+    print("Starting Chinese transcription...")
 
     segments, info = model.transcribe(
-
         str(audio),
-
         language="zh",
-
         beam_size=1,
-
         best_of=1,
-
         temperature=0,
-
         vad_filter=True,
-
         condition_on_previous_text=False
     )
 
@@ -175,15 +155,8 @@ def transcribe_chinese(
             continue
 
         results.append({
-
-            "start": float(
-                segment.start
-            ),
-
-            "end": float(
-                segment.end
-            ),
-
+            "start": float(segment.start),
+            "end": float(segment.end),
             "text": text
         })
 
@@ -194,110 +167,177 @@ def transcribe_chinese(
             desc=f"Chinese speech: {count}"
         )
 
-    print(
-        "Segments:",
-        len(results)
-    )
+    print("Segments:", len(results))
 
     return results
 
 
 # ============================================================
-# TRANSLATE ONE BATCH
+# MYMEMORY TRANSLATION
 # ============================================================
 
-def translate_batch_with_retry(
-    translator,
-    texts,
-    max_retries=4
-):
+def translate_mymemory(text):
 
-    if not texts:
-        return []
+    url = "https://api.mymemory.translated.net/get"
 
-    # Use a separator that normally survives translation.
-    separator = "\n|||SEGMENT||| \n"
+    params = {
+        "q": text,
+        "langpair": "zh-CN|hi"
+    }
 
-    combined = separator.join(texts)
+    response = requests.get(
+        url,
+        params=params,
+        timeout=30
+    )
 
-    for attempt in range(max_retries):
+    response.raise_for_status()
 
-        try:
+    data = response.json()
 
-            result = translator.translate(
-                combined
-            )
+    response_data = data.get(
+        "responseData",
+        {}
+    )
 
-            if not result:
-                raise RuntimeError(
-                    "Empty translation returned."
-                )
+    translated = response_data.get(
+        "translatedText"
+    )
 
-            # Try normal separator first.
-            parts = result.split(
-                "|||SEGMENT|||"
-            )
-
-            parts = [
-                part.strip()
-                for part in parts
-            ]
-
-            parts = [
-                part
-                for part in parts
-                if part
-            ]
-
-            # If Google changed/removed separator,
-            # fall back to line-based splitting.
-            if len(parts) != len(texts):
-
-                lines = [
-                    line.strip()
-                    for line in result.splitlines()
-                    if line.strip()
-                ]
-
-                if len(lines) == len(texts):
-                    parts = lines
-
-            if len(parts) == len(texts):
-
-                return parts
-
-            print(
-                "Batch split mismatch:",
-                len(parts),
-                "expected:",
-                len(texts)
-            )
-
-        except Exception as e:
-
-            print(
-                f"Batch translation attempt "
-                f"{attempt + 1}/{max_retries} failed:",
-                e
-            )
-
-        # Exponential backoff.
-        wait_time = min(
-            2 ** attempt,
-            10
+    if not translated:
+        raise RuntimeError(
+            "MyMemory returned empty translation."
         )
+
+    return translated.strip()
+
+
+# ============================================================
+# GOOGLE TRANSLATE WEB FALLBACK
+# ============================================================
+
+def translate_google_fallback(text):
+
+    import urllib.parse
+
+    encoded = urllib.parse.quote(text)
+
+    url = (
+        "https://translate.googleapis.com/"
+        "translate_a/single"
+        "?client=gtx"
+        "&sl=zh-CN"
+        "&tl=hi"
+        "&dt=t"
+        f"&q={encoded}"
+    )
+
+    response = requests.get(
+        url,
+        timeout=30,
+        headers={
+            "User-Agent": "Mozilla/5.0"
+        }
+    )
+
+    response.raise_for_status()
+
+    data = response.json()
+
+    translated_parts = []
+
+    if isinstance(data, list) and len(data) > 0:
+
+        parts = data[0]
+
+        if isinstance(parts, list):
+
+            for part in parts:
+
+                if (
+                    isinstance(part, list)
+                    and len(part) > 0
+                    and part[0]
+                ):
+                    translated_parts.append(
+                        str(part[0])
+                    )
+
+    translated = "".join(
+        translated_parts
+    ).strip()
+
+    if not translated:
+
+        raise RuntimeError(
+            "Google returned empty translation."
+        )
+
+    return translated
+
+
+# ============================================================
+# TRANSLATE SINGLE TEXT
+# ============================================================
+
+def translate_single_text(text):
+
+    text = text.strip()
+
+    if not text:
+        return ""
+
+    # --------------------------------------------------------
+    # FIRST: MYMEMORY
+    # --------------------------------------------------------
+
+    try:
 
         print(
-            f"Waiting {wait_time} seconds..."
+            "Trying MyMemory translation..."
         )
 
-        time.sleep(wait_time)
+        result = translate_mymemory(text)
 
-    return []
+        if result:
+            return result
+
+    except Exception as e:
+
+        print(
+            "MyMemory error:",
+            e
+        )
+
+    # --------------------------------------------------------
+    # SECOND: GOOGLE FALLBACK
+    # --------------------------------------------------------
+
+    try:
+
+        print(
+            "Trying Google fallback..."
+        )
+
+        result = translate_google_fallback(
+            text
+        )
+
+        if result:
+            return result
+
+    except Exception as e:
+
+        print(
+            "Google fallback error:",
+            e
+        )
+
+    return ""
 
 
 # ============================================================
-# TRANSLATE CHINESE TO HINDI
+# CHINESE -> HINDI
 # ============================================================
 
 def translate_to_hindi(
@@ -305,194 +345,93 @@ def translate_to_hindi(
     progress
 ):
 
-    print(
-        "Starting batch translation..."
-    )
-
-    if not segments:
-        return []
-
-    translator = GoogleTranslator(
-        source="zh-CN",
-        target="hi"
-    )
+    print("Starting translation...")
 
     results = []
 
     total = len(segments)
 
+    if total == 0:
+        return []
+
+    # Free Whisper memory before translation
+    global whisper_model
+
+    whisper_model = None
+
+    import gc
+
+    gc.collect()
+
     # --------------------------------------------------------
-    # IMPORTANT:
-    # Do NOT translate every Whisper segment separately.
-    #
-    # This reduces Google Translate requests significantly.
+    # TRANSLATE
     # --------------------------------------------------------
 
-    # Number of segments per Google request.
-    BATCH_SIZE = 5
+    for index, segment in enumerate(segments):
 
-    batches = []
+        chinese_text = segment["text"].strip()
 
-    for i in range(
-        0,
-        total,
-        BATCH_SIZE
-    ):
-
-        batches.append(
-            segments[
-                i:i + BATCH_SIZE
-            ]
-        )
-
-    total_batches = len(batches)
-
-    print(
-        "Translation batches:",
-        total_batches
-    )
-
-    translated_index = 0
-
-    for batch_index, batch in enumerate(
-        batches
-    ):
-
-        texts = [
-            item["text"].strip()
-            for item in batch
-            if item["text"].strip()
-        ]
-
-        if not texts:
+        if not chinese_text:
             continue
 
         print(
-            f"Translating batch "
-            f"{batch_index + 1}/{total_batches}"
+            f"Translating "
+            f"{index + 1}/{total}: "
+            f"{chinese_text[:100]}"
         )
 
-        translated = translate_batch_with_retry(
-            translator,
-            texts
-        )
+        hindi_text = ""
 
-        # ----------------------------------------------------
-        # If batch translation fails, try individual requests
-        # slowly as a fallback.
-        # ----------------------------------------------------
+        for attempt in range(2):
 
-        if len(translated) != len(texts):
-
-            print(
-                "Batch failed. "
-                "Using slow fallback translation..."
+            hindi_text = translate_single_text(
+                chinese_text
             )
 
-            translated = []
-
-            for text in texts:
-
-                translated_text = None
-
-                for attempt in range(3):
-
-                    try:
-
-                        # Small delay prevents rate limiting.
-                        time.sleep(0.7)
-
-                        translated_text = (
-                            translator.translate(text)
-                        )
-
-                        if translated_text:
-                            break
-
-                    except Exception as e:
-
-                        print(
-                            "Fallback translation error:",
-                            e
-                        )
-
-                        time.sleep(
-                            2 + attempt * 2
-                        )
-
-                translated.append(
-                    translated_text or ""
-                )
-
-        # ----------------------------------------------------
-        # Match translations with original timestamps.
-        # ----------------------------------------------------
-
-        translation_position = 0
-
-        for segment in batch:
-
-            chinese_text = (
-                segment["text"].strip()
-            )
-
-            if not chinese_text:
-                continue
-
-            if translation_position >= len(
-                translated
-            ):
+            if hindi_text:
                 break
 
-            hindi_text = (
-                translated[
-                    translation_position
-                ]
-                .strip()
+            wait = 2 + (attempt * 3)
+
+            print(
+                f"Translation retry "
+                f"in {wait} seconds..."
             )
 
-            translation_position += 1
+            time.sleep(wait)
 
-            if not hindi_text:
-                continue
+        if hindi_text:
 
             results.append({
-
                 "start": segment["start"],
-
                 "end": segment["end"],
-
                 "text": hindi_text
             })
 
-            translated_index += 1
+        else:
 
-        percent = (
-            0.25
-            +
-            (
-                0.20
-                *
-                (
-                    (batch_index + 1)
-                    /
-                    max(total_batches, 1)
-                )
+            print(
+                "Translation failed for segment:",
+                index + 1
             )
-        )
 
         progress(
-            percent,
+            0.25 + (
+                0.20 *
+                (
+                    (index + 1)
+                    /
+                    max(total, 1)
+                )
+            ),
             desc=(
                 f"Translation "
-                f"{batch_index + 1}/"
-                f"{total_batches}"
+                f"{index + 1}/{total}"
             )
         )
 
-        # Small delay between batches.
-        if batch_index < total_batches - 1:
-            time.sleep(0.5)
+        # Prevent rate limiting
+        time.sleep(0.8)
 
     print(
         "Hindi segments:",
@@ -503,7 +442,7 @@ def translate_to_hindi(
 
 
 # ============================================================
-# TEXT TO HINDI VOICE
+# HINDI TTS
 # ============================================================
 
 def make_voice(
@@ -542,17 +481,11 @@ def create_hindi_audio(
 
     voice_files = []
 
-    total = len(
-        segments
-    )
+    total = len(segments)
 
-    print(
-        "Creating Hindi voice..."
-    )
+    print("Creating Hindi voice...")
 
-    for index, segment in enumerate(
-        segments
-    ):
+    for index, segment in enumerate(segments):
 
         text = segment["text"].strip()
 
@@ -572,9 +505,7 @@ def create_hindi_audio(
             )
 
             voice_files.append({
-
                 "file": voice_file,
-
                 "start": segment["start"]
             })
 
@@ -587,8 +518,7 @@ def create_hindi_audio(
 
         progress(
             0.45 + (
-                0.25
-                *
+                0.25 *
                 (
                     (index + 1)
                     /
@@ -608,7 +538,7 @@ def create_hindi_audio(
         )
 
     # --------------------------------------------------------
-    # FFMPEG INPUTS
+    # FFMPEG AUDIO
     # --------------------------------------------------------
 
     command = [
@@ -625,15 +555,11 @@ def create_hindi_audio(
 
     filters = []
 
-    for index, item in enumerate(
-        voice_files
-    ):
+    for index, item in enumerate(voice_files):
 
         delay_ms = max(
             0,
-            int(
-                item["start"] * 1000
-            )
+            int(item["start"] * 1000)
         )
 
         filters.append(
@@ -645,9 +571,7 @@ def create_hindi_audio(
 
     inputs = "".join(
         f"[a{i}]"
-        for i in range(
-            len(voice_files)
-        )
+        for i in range(len(voice_files))
     )
 
     filters.append(
@@ -659,9 +583,7 @@ def create_hindi_audio(
         f"[out]"
     )
 
-    filter_complex = ";".join(
-        filters
-    )
+    filter_complex = ";".join(filters)
 
     command.extend([
 
@@ -689,9 +611,7 @@ def create_hindi_audio(
         str(output_audio)
     ])
 
-    run_command(
-        command
-    )
+    run_command(command)
 
 
 # ============================================================
@@ -710,7 +630,6 @@ def render_video(
         desc="Rendering 9:16 video..."
     )
 
-    # 1080x1920 = exact 9:16
     video_filter = (
         "scale=1080:1920:"
         "force_original_aspect_ratio=increase,"
@@ -729,11 +648,9 @@ def render_video(
         "-i",
         str(hindi_audio),
 
-        # Original video
         "-map",
         "0:v:0",
 
-        # Hindi audio
         "-map",
         "1:a:0",
 
@@ -776,9 +693,7 @@ def render_video(
 # CLEANUP
 # ============================================================
 
-def cleanup(
-    path
-):
+def cleanup(path):
 
     try:
 
@@ -848,7 +763,7 @@ def convert_video(
     try:
 
         # ----------------------------------------------------
-        # COPY VIDEO
+        # PREPARE
         # ----------------------------------------------------
 
         progress(
@@ -903,11 +818,9 @@ def convert_video(
             desc="Recognizing Chinese speech..."
         )
 
-        chinese_segments = (
-            transcribe_chinese(
-                source_audio,
-                progress
-            )
+        chinese_segments = transcribe_chinese(
+            source_audio,
+            progress
         )
 
         if not chinese_segments:
@@ -925,19 +838,16 @@ def convert_video(
             desc="Translating into Hindi..."
         )
 
-        hindi_segments = (
-            translate_to_hindi(
-                chinese_segments,
-                progress
-            )
+        hindi_segments = translate_to_hindi(
+            chinese_segments,
+            progress
         )
 
         if not hindi_segments:
 
             raise gr.Error(
-                "Hindi translation failed. "
-                "Google Translate may be temporarily "
-                "rate-limiting the server. Please try again."
+                "Chinese-to-Hindi translation failed. "
+                "Please try again later."
             )
 
         # ----------------------------------------------------
@@ -973,9 +883,7 @@ def convert_video(
             output_video
         )
 
-        return str(
-            output_video
-        )
+        return str(output_video)
 
     except gr.Error:
 
@@ -994,9 +902,7 @@ def convert_video(
 
     finally:
 
-        cleanup(
-            job_dir
-        )
+        cleanup(job_dir)
 
 
 # ============================================================
