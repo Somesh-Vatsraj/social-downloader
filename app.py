@@ -2,6 +2,7 @@ import os
 import uuid
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import gradio as gr
@@ -15,7 +16,6 @@ from gtts import gTTS
 # ============================================================
 
 BASE_DIR = Path("/tmp/chinese_hindi")
-
 OUTPUT_DIR = BASE_DIR / "outputs"
 
 OUTPUT_DIR.mkdir(
@@ -116,24 +116,17 @@ def extract_audio(
 ):
 
     run_command([
-
         "ffmpeg",
         "-y",
-
         "-i",
         str(video),
-
         "-vn",
-
         "-ac",
         "1",
-
         "-ar",
         "16000",
-
         "-c:a",
         "pcm_s16le",
-
         str(audio)
     ])
 
@@ -210,6 +203,100 @@ def transcribe_chinese(
 
 
 # ============================================================
+# TRANSLATE ONE BATCH
+# ============================================================
+
+def translate_batch_with_retry(
+    translator,
+    texts,
+    max_retries=4
+):
+
+    if not texts:
+        return []
+
+    # Use a separator that normally survives translation.
+    separator = "\n|||SEGMENT||| \n"
+
+    combined = separator.join(texts)
+
+    for attempt in range(max_retries):
+
+        try:
+
+            result = translator.translate(
+                combined
+            )
+
+            if not result:
+                raise RuntimeError(
+                    "Empty translation returned."
+                )
+
+            # Try normal separator first.
+            parts = result.split(
+                "|||SEGMENT|||"
+            )
+
+            parts = [
+                part.strip()
+                for part in parts
+            ]
+
+            parts = [
+                part
+                for part in parts
+                if part
+            ]
+
+            # If Google changed/removed separator,
+            # fall back to line-based splitting.
+            if len(parts) != len(texts):
+
+                lines = [
+                    line.strip()
+                    for line in result.splitlines()
+                    if line.strip()
+                ]
+
+                if len(lines) == len(texts):
+                    parts = lines
+
+            if len(parts) == len(texts):
+
+                return parts
+
+            print(
+                "Batch split mismatch:",
+                len(parts),
+                "expected:",
+                len(texts)
+            )
+
+        except Exception as e:
+
+            print(
+                f"Batch translation attempt "
+                f"{attempt + 1}/{max_retries} failed:",
+                e
+            )
+
+        # Exponential backoff.
+        wait_time = min(
+            2 ** attempt,
+            10
+        )
+
+        print(
+            f"Waiting {wait_time} seconds..."
+        )
+
+        time.sleep(wait_time)
+
+    return []
+
+
+# ============================================================
 # TRANSLATE CHINESE TO HINDI
 # ============================================================
 
@@ -218,6 +305,13 @@ def translate_to_hindi(
     progress
 ):
 
+    print(
+        "Starting batch translation..."
+    )
+
+    if not segments:
+        return []
+
     translator = GoogleTranslator(
         source="zh-CN",
         target="hi"
@@ -225,42 +319,142 @@ def translate_to_hindi(
 
     results = []
 
-    total = len(
-        segments
-    )
+    total = len(segments)
 
-    print(
-        "Starting translation..."
-    )
+    # --------------------------------------------------------
+    # IMPORTANT:
+    # Do NOT translate every Whisper segment separately.
+    #
+    # This reduces Google Translate requests significantly.
+    # --------------------------------------------------------
 
-    for index, segment in enumerate(
-        segments
+    # Number of segments per Google request.
+    BATCH_SIZE = 5
+
+    batches = []
+
+    for i in range(
+        0,
+        total,
+        BATCH_SIZE
     ):
 
-        chinese_text = (
-            segment["text"]
-            .strip()
+        batches.append(
+            segments[
+                i:i + BATCH_SIZE
+            ]
         )
 
-        if not chinese_text:
+    total_batches = len(batches)
+
+    print(
+        "Translation batches:",
+        total_batches
+    )
+
+    translated_index = 0
+
+    for batch_index, batch in enumerate(
+        batches
+    ):
+
+        texts = [
+            item["text"].strip()
+            for item in batch
+            if item["text"].strip()
+        ]
+
+        if not texts:
             continue
 
-        try:
+        print(
+            f"Translating batch "
+            f"{batch_index + 1}/{total_batches}"
+        )
 
-            hindi_text = translator.translate(
-                chinese_text
-            )
+        translated = translate_batch_with_retry(
+            translator,
+            texts
+        )
 
-        except Exception as e:
+        # ----------------------------------------------------
+        # If batch translation fails, try individual requests
+        # slowly as a fallback.
+        # ----------------------------------------------------
+
+        if len(translated) != len(texts):
 
             print(
-                "Translation error:",
-                e
+                "Batch failed. "
+                "Using slow fallback translation..."
             )
 
-            continue
+            translated = []
 
-        if hindi_text:
+            for text in texts:
+
+                translated_text = None
+
+                for attempt in range(3):
+
+                    try:
+
+                        # Small delay prevents rate limiting.
+                        time.sleep(0.7)
+
+                        translated_text = (
+                            translator.translate(text)
+                        )
+
+                        if translated_text:
+                            break
+
+                    except Exception as e:
+
+                        print(
+                            "Fallback translation error:",
+                            e
+                        )
+
+                        time.sleep(
+                            2 + attempt * 2
+                        )
+
+                translated.append(
+                    translated_text or ""
+                )
+
+        # ----------------------------------------------------
+        # Match translations with original timestamps.
+        # ----------------------------------------------------
+
+        translation_position = 0
+
+        for segment in batch:
+
+            chinese_text = (
+                segment["text"].strip()
+            )
+
+            if not chinese_text:
+                continue
+
+            if translation_position >= len(
+                translated
+            ):
+                break
+
+            hindi_text = (
+                translated[
+                    translation_position
+                ]
+                .strip()
+            )
+
+            translation_position += 1
+
+            if not hindi_text:
+                continue
 
             results.append({
 
@@ -268,16 +462,21 @@ def translate_to_hindi(
 
                 "end": segment["end"],
 
-                "text": hindi_text.strip()
+                "text": hindi_text
             })
 
+            translated_index += 1
+
         percent = (
-            0.25 +
+            0.25
+            +
             (
-                0.20 *
+                0.20
+                *
                 (
-                    (index + 1) /
-                    max(total, 1)
+                    (batch_index + 1)
+                    /
+                    max(total_batches, 1)
                 )
             )
         )
@@ -286,9 +485,14 @@ def translate_to_hindi(
             percent,
             desc=(
                 f"Translation "
-                f"{index + 1}/{total}"
+                f"{batch_index + 1}/"
+                f"{total_batches}"
             )
         )
+
+        # Small delay between batches.
+        if batch_index < total_batches - 1:
+            time.sleep(0.5)
 
     print(
         "Hindi segments:",
@@ -383,9 +587,11 @@ def create_hindi_audio(
 
         progress(
             0.45 + (
-                0.25 *
+                0.25
+                *
                 (
-                    (index + 1) /
+                    (index + 1)
+                    /
                     max(total, 1)
                 )
             ),
@@ -504,6 +710,7 @@ def render_video(
         desc="Rendering 9:16 video..."
     )
 
+    # 1080x1920 = exact 9:16
     video_filter = (
         "scale=1080:1920:"
         "force_original_aspect_ratio=increase,"
@@ -728,7 +935,9 @@ def convert_video(
         if not hindi_segments:
 
             raise gr.Error(
-                "Hindi translation failed."
+                "Hindi translation failed. "
+                "Google Translate may be temporarily "
+                "rate-limiting the server. Please try again."
             )
 
         # ----------------------------------------------------
