@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: social-downloader
+    env: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: WHISPER_MODEL
+        value: tiny
+      - key: HINDI_VOICE
+        value: hi-IN-SwaraNeural
+      - key: KUAISHOU_COOKIE
+        sync: false
+      - key: KUAISHOU_KWW
+        sync: false
