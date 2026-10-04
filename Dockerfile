@@ -5,17 +5,16 @@ ENV PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
 
-# FFmpeg + required libraries
 RUN apt-get update && \
-    apt-get install -y \
+    apt-get install -y --no-install-recommends \
     ffmpeg \
     libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 
-RUN pip install --upgrade pip && \
-    pip install -r requirements.txt
+RUN pip install --no-cache-dir \
+    -r requirements.txt
 
 COPY app.py .
 
