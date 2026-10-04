@@ -1,7 +1,7 @@
 import os
 import uuid
-import subprocess
 import shutil
+import subprocess
 from pathlib import Path
 
 import gradio as gr
@@ -10,37 +10,63 @@ from deep_translator import GoogleTranslator
 from gtts import gTTS
 
 
-# =========================================================
+# ============================================================
 # CONFIG
-# =========================================================
+# ============================================================
 
-BASE_DIR = Path("/tmp/chinese_hindi_tool")
+BASE_DIR = Path("/tmp/chinese_hindi")
+
 UPLOAD_DIR = BASE_DIR / "uploads"
-OUTPUT_DIR = BASE_DIR / "outputs"
 AUDIO_DIR = BASE_DIR / "audio"
+OUTPUT_DIR = BASE_DIR / "outputs"
 
-for folder in [UPLOAD_DIR, OUTPUT_DIR, AUDIO_DIR]:
+for folder in [UPLOAD_DIR, AUDIO_DIR, OUTPUT_DIR]:
     folder.mkdir(parents=True, exist_ok=True)
 
-# CPU friendly model
-# "tiny" = faster
-# "small" = better transcription but slower
-WHISPER_MODEL = "small"
 
-print("Loading Whisper model...")
-model = WhisperModel(
-    WHISPER_MODEL,
-    device="cpu",
-    compute_type="int8"
-)
-print("Whisper model loaded.")
+# IMPORTANT:
+# tiny model is used because Render Free/low-RAM
+# instances can run out of memory with "small".
+WHISPER_MODEL_NAME = "tiny"
+
+whisper_model = None
 
 
-# =========================================================
-# UTILITY
-# =========================================================
+# ============================================================
+# WHISPER - LAZY LOAD
+# ============================================================
+
+def get_whisper_model():
+
+    global whisper_model
+
+    if whisper_model is None:
+
+        print("========================================")
+        print("Loading Whisper tiny model...")
+        print("========================================")
+
+        whisper_model = WhisperModel(
+            WHISPER_MODEL_NAME,
+            device="cpu",
+            compute_type="int8",
+            cpu_threads=1,
+            num_workers=1
+        )
+
+        print("Whisper model loaded.")
+
+    return whisper_model
+
+
+# ============================================================
+# COMMAND RUNNER
+# ============================================================
 
 def run_command(command):
+
+    print("Running:", " ".join(map(str, command)))
+
     result = subprocess.run(
         command,
         stdout=subprocess.PIPE,
@@ -49,57 +75,94 @@ def run_command(command):
     )
 
     if result.returncode != 0:
+
+        print(result.stderr)
+
         raise RuntimeError(
-            "Command failed:\n\n" + result.stderr[-5000:]
+            result.stderr[-4000:]
         )
 
     return result
 
 
-def get_video_duration(video_path):
+# ============================================================
+# VIDEO DURATION
+# ============================================================
+
+def get_video_duration(video):
+
     result = run_command([
         "ffprobe",
-        "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        str(video_path)
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        str(video)
     ])
 
     return float(result.stdout.strip())
 
 
-# =========================================================
+# ============================================================
 # EXTRACT AUDIO
-# =========================================================
+# ============================================================
 
-def extract_audio(video_path, audio_path):
+def extract_audio(video, audio):
+
     run_command([
         "ffmpeg",
         "-y",
-        "-i", str(video_path),
+
+        "-i",
+        str(video),
+
         "-vn",
-        "-ac", "1",
-        "-ar", "16000",
-        "-c:a", "pcm_s16le",
-        str(audio_path)
+
+        "-ac",
+        "1",
+
+        "-ar",
+        "16000",
+
+        "-c:a",
+        "pcm_s16le",
+
+        str(audio)
     ])
 
 
-# =========================================================
-# TRANSCRIBE CHINESE
-# =========================================================
+# ============================================================
+# CHINESE SPEECH TO TEXT
+# ============================================================
 
-def transcribe_chinese(audio_path, progress=None):
+def transcribe_chinese(audio, progress):
+
+    model = get_whisper_model()
+
+    print("Starting Chinese transcription...")
 
     segments, info = model.transcribe(
-        str(audio_path),
+
+        str(audio),
+
         language="zh",
-        beam_size=5,
+
+        beam_size=1,
+
+        best_of=1,
+
+        temperature=0,
+
         vad_filter=True,
-        condition_on_previous_text=True
+
+        condition_on_previous_text=False
     )
 
-    results = []
+    result = []
+
+    count = 0
 
     for segment in segments:
 
@@ -108,229 +171,300 @@ def transcribe_chinese(audio_path, progress=None):
         if not text:
             continue
 
-        results.append({
+        result.append({
+
             "start": float(segment.start),
+
             "end": float(segment.end),
+
             "text": text
         })
 
-        if progress:
-            progress(
-                0.25,
-                desc=f"Chinese speech detected: {len(results)} segments"
-            )
+        count += 1
 
-    return results
+        progress(
+            0.15,
+            desc=f"Chinese speech detected: {count}"
+        )
+
+    print(
+        "Transcription segments:",
+        len(result)
+    )
+
+    return result
 
 
-# =========================================================
-# TRANSLATE CHINESE -> HINDI
-# =========================================================
+# ============================================================
+# CHINESE -> HINDI
+# ============================================================
 
-def translate_to_hindi(segments, progress=None):
+def translate_chinese_to_hindi(
+    segments,
+    progress
+):
 
     translator = GoogleTranslator(
         source="zh-CN",
         target="hi"
     )
 
-    translated = []
+    result = []
 
     total = len(segments)
 
-    for i, segment in enumerate(segments):
+    print("Starting translation...")
 
-        chinese_text = segment["text"].strip()
+    for index, segment in enumerate(segments):
 
-        if not chinese_text:
+        chinese = segment["text"].strip()
+
+        if not chinese:
             continue
 
+        hindi = ""
+
         try:
-            hindi_text = translator.translate(chinese_text)
 
-        except Exception as e:
-            print("Translation error:", e)
-            hindi_text = chinese_text
-
-        translated.append({
-            "start": segment["start"],
-            "end": segment["end"],
-            "text": hindi_text
-        })
-
-        if progress:
-            percent = 0.25 + (0.20 * ((i + 1) / max(total, 1)))
-            progress(
-                percent,
-                desc=f"Translating to Hindi: {i + 1}/{total}"
+            hindi = translator.translate(
+                chinese
             )
 
-    return translated
+        except Exception as e:
+
+            print(
+                "Translation error:",
+                e
+            )
+
+            # If translation fails, skip this segment.
+            continue
+
+        if hindi:
+
+            result.append({
+
+                "start": segment["start"],
+
+                "end": segment["end"],
+
+                "text": hindi.strip()
+            })
+
+        percent = 0.25 + (
+            0.20 *
+            ((index + 1) / max(total, 1))
+        )
+
+        progress(
+            percent,
+            desc=f"Translating: {index + 1}/{total}"
+        )
+
+    print(
+        "Translated segments:",
+        len(result)
+    )
+
+    return result
 
 
-# =========================================================
-# CREATE HINDI VOICE
-# =========================================================
+# ============================================================
+# CREATE ONE TTS FILE
+# ============================================================
+
+def create_tts(text, filename):
+
+    tts = gTTS(
+        text=text,
+        lang="hi",
+        slow=False
+    )
+
+    tts.save(str(filename))
+
+
+# ============================================================
+# CREATE HINDI AUDIO
+# ============================================================
 
 def create_hindi_audio(
     segments,
+    duration,
     output_audio,
-    video_duration,
-    progress=None
+    job_dir,
+    progress
 ):
 
-    generated_files = []
+    if not segments:
 
-    for i, segment in enumerate(segments):
+        raise RuntimeError(
+            "No Hindi text was generated."
+        )
+
+    generated = []
+
+    total = len(segments)
+
+    print("Generating Hindi voice...")
+
+    for index, segment in enumerate(segments):
 
         text = segment["text"].strip()
 
         if not text:
             continue
 
-        filename = AUDIO_DIR / f"{uuid.uuid4().hex}.mp3"
+        tts_file = (
+            job_dir /
+            f"voice_{index:05d}.mp3"
+        )
 
         try:
-            # Hindi voice
-            tts = gTTS(
-                text=text,
-                lang="hi",
-                slow=False
+
+            create_tts(
+                text,
+                tts_file
             )
 
-            tts.save(str(filename))
+            generated.append({
+
+                "file": tts_file,
+
+                "start": segment["start"]
+            })
 
         except Exception as e:
-            print("TTS error:", e)
-            continue
 
-        generated_files.append({
-            "file": filename,
-            "start": segment["start"],
-            "end": segment["end"]
-        })
-
-        if progress:
-            percent = 0.45 + (
-                0.30 * ((i + 1) / max(len(segments), 1))
+            print(
+                "TTS failed:",
+                e
             )
 
-            progress(
-                percent,
-                desc=f"Creating Hindi voice: {i + 1}/{len(segments)}"
-            )
+        percent = 0.45 + (
+            0.25 *
+            ((index + 1) / max(total, 1))
+        )
 
-    # -----------------------------------------------------
-    # Create silent full-length audio
-    # -----------------------------------------------------
+        progress(
+            percent,
+            desc=f"Creating Hindi voice: {index + 1}/{total}"
+        )
 
-    silent_audio = AUDIO_DIR / f"{uuid.uuid4().hex}_silent.wav"
+    if not generated:
 
-    run_command([
+        raise RuntimeError(
+            "Hindi voice could not be generated."
+        )
+
+    # --------------------------------------------------------
+    # Build ffmpeg command
+    # --------------------------------------------------------
+
+    command = [
         "ffmpeg",
-        "-y",
-        "-f", "lavfi",
-        "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-        "-t", str(video_duration),
-        "-c:a", "pcm_s16le",
-        str(silent_audio)
-    ])
-
-    # -----------------------------------------------------
-    # Create delay + audio for every TTS segment
-    # -----------------------------------------------------
-
-    input_args = [
-        "ffmpeg",
-        "-y",
-        "-i", str(silent_audio)
+        "-y"
     ]
 
-    filter_parts = []
+    # Add every generated voice file
+    for item in generated:
 
-    for i, item in enumerate(generated_files):
-
-        input_args.extend([
+        command.extend([
             "-i",
             str(item["file"])
         ])
 
-        delay_ms = max(
+    filter_parts = []
+
+    for index, item in enumerate(generated):
+
+        delay = max(
             0,
             int(item["start"] * 1000)
         )
 
         filter_parts.append(
-            f"[{i + 1}:a]"
-            f"adelay={delay_ms}|{delay_ms},"
+            f"[{index}:a]"
+            f"adelay={delay}:all=1,"
             f"aresample=44100"
-            f"[a{i}]"
+            f"[a{index}]"
         )
 
-    if not generated_files:
-        shutil.copy(
-            silent_audio,
-            output_audio
-        )
-        return
-
-    # Mix all voices
-    voice_inputs = "".join(
+    inputs = "".join(
         f"[a{i}]"
-        for i in range(len(generated_files))
+        for i in range(len(generated))
     )
 
-    filter_complex = ";".join(filter_parts)
-
-    filter_complex += (
-        f";{voice_inputs}"
-        f"amix=inputs={len(generated_files)}:"
+    filter_parts.append(
+        f"{inputs}"
+        f"amix="
+        f"inputs={len(generated)}:"
         f"duration=longest:"
         f"dropout_transition=0,"
-        f"volume=1.0"
-        f"[mixed]"
+        f"loudnorm=I=-16:TP=-1.5:LRA=11"
+        f"[out]"
     )
 
-    input_args.extend([
+    filter_complex = ";".join(
+        filter_parts
+    )
+
+    command.extend([
+
         "-filter_complex",
         filter_complex,
+
         "-map",
-        "[mixed]",
+        "[out]",
+
         "-t",
-        str(video_duration),
+        str(duration),
+
+        "-ac",
+        "2",
+
+        "-ar",
+        "44100",
+
         "-c:a",
         "aac",
+
         "-b:a",
-        "192k",
+        "128k",
+
         str(output_audio)
     ])
 
-    run_command(input_args)
+    run_command(command)
+
+    print(
+        "Hindi audio created:",
+        output_audio
+    )
 
 
-# =========================================================
+# ============================================================
 # CREATE 9:16 VIDEO
-# =========================================================
+# ============================================================
 
-def create_vertical_video(
+def render_video(
     input_video,
     hindi_audio,
     output_video,
-    progress=None
+    progress
 ):
 
-    if progress:
-        progress(
-            0.80,
-            desc="Creating 9:16 vertical video..."
-        )
+    progress(
+        0.75,
+        desc="Rendering 9:16 video..."
+    )
 
-    # -----------------------------------------------------
-    # 9:16 crop
+    # Center crop.
     #
-    # scale to height 1920
-    # crop width 1080
-    # -----------------------------------------------------
+    # This converts the source into 1080x1920.
+    #
+    # If the original video is landscape,
+    # the sides will be cropped.
 
     video_filter = (
         "scale=1080:1920:"
@@ -340,7 +474,9 @@ def create_vertical_video(
     )
 
     run_command([
+
         "ffmpeg",
+
         "-y",
 
         "-i",
@@ -349,8 +485,11 @@ def create_vertical_video(
         "-i",
         str(hindi_audio),
 
+        # Video from original
         "-map",
         "0:v:0",
+
+        # Hindi audio
         "-map",
         "1:a:0",
 
@@ -364,13 +503,16 @@ def create_vertical_video(
         "veryfast",
 
         "-crf",
-        "23",
+        "26",
+
+        "-pix_fmt",
+        "yuv420p",
 
         "-c:a",
         "aac",
 
         "-b:a",
-        "192k",
+        "128k",
 
         "-movflags",
         "+faststart",
@@ -380,56 +522,123 @@ def create_vertical_video(
         str(output_video)
     ])
 
-    if progress:
-        progress(
-            1.0,
-            desc="Finished!"
+    progress(
+        1.0,
+        desc="Completed!"
+    )
+
+
+# ============================================================
+# CLEANUP
+# ============================================================
+
+def cleanup_directory(directory):
+
+    try:
+
+        if directory.exists():
+
+            shutil.rmtree(
+                directory,
+                ignore_errors=True
+            )
+
+    except Exception as e:
+
+        print(
+            "Cleanup error:",
+            e
         )
 
 
-# =========================================================
-# MAIN PROCESS
-# =========================================================
+# ============================================================
+# MAIN
+# ============================================================
 
-def convert_video(video_file, progress=gr.Progress()):
+def convert_video(
+    video_file,
+    progress=gr.Progress()
+):
 
-    if video_file is None:
-        raise gr.Error("Please upload a video.")
+    if not video_file:
+
+        raise gr.Error(
+            "Please upload a Chinese video."
+        )
 
     job_id = uuid.uuid4().hex
 
-    input_path = UPLOAD_DIR / f"{job_id}.mp4"
-    source_audio = AUDIO_DIR / f"{job_id}_source.wav"
-    hindi_audio = AUDIO_DIR / f"{job_id}_hindi.m4a"
-    output_path = OUTPUT_DIR / f"{job_id}_hindi_9x16.mp4"
+    job_dir = (
+        BASE_DIR /
+        "jobs" /
+        job_id
+    )
+
+    job_dir.mkdir(
+        parents=True,
+        exist_ok=True
+    )
+
+    input_video = (
+        job_dir /
+        "input.mp4"
+    )
+
+    source_audio = (
+        job_dir /
+        "source.wav"
+    )
+
+    hindi_audio = (
+        job_dir /
+        "hindi.m4a"
+    )
+
+    output_video = (
+        OUTPUT_DIR /
+        f"hindivideo_{job_id}.mp4"
+    )
 
     try:
+
+        # ----------------------------------------------------
+        # COPY INPUT
+        # ----------------------------------------------------
 
         progress(
             0.02,
             desc="Preparing video..."
         )
 
-        # Copy uploaded file
-        shutil.copy(
+        shutil.copyfile(
             str(video_file),
-            str(input_path)
+            str(input_video)
         )
 
-        # -------------------------------------------------
-        # Duration
-        # -------------------------------------------------
+        # ----------------------------------------------------
+        # DURATION
+        # ----------------------------------------------------
 
-        duration = get_video_duration(input_path)
+        duration = get_video_duration(
+            input_video
+        )
 
-        if duration > 45 * 60:
+        print(
+            "Video duration:",
+            duration,
+            "seconds"
+        )
+
+        # Maximum 30 minutes
+        if duration > 30 * 60:
+
             raise gr.Error(
-                "Maximum video length is 45 minutes."
+                "Maximum supported video length is 30 minutes."
             )
 
-        # -------------------------------------------------
-        # Extract original audio
-        # -------------------------------------------------
+        # ----------------------------------------------------
+        # AUDIO
+        # ----------------------------------------------------
 
         progress(
             0.08,
@@ -437,133 +646,154 @@ def convert_video(video_file, progress=gr.Progress()):
         )
 
         extract_audio(
-            input_path,
+            input_video,
             source_audio
         )
 
-        # -------------------------------------------------
-        # Speech recognition
-        # -------------------------------------------------
+        # ----------------------------------------------------
+        # TRANSCRIPTION
+        # ----------------------------------------------------
 
         progress(
-            0.15,
+            0.12,
             desc="Recognizing Chinese speech..."
         )
 
-        segments = transcribe_chinese(
-            source_audio,
-            progress
+        chinese_segments = (
+            transcribe_chinese(
+                source_audio,
+                progress
+            )
         )
 
-        if not segments:
+        if not chinese_segments:
+
             raise gr.Error(
                 "Chinese speech was not detected."
             )
 
-        # -------------------------------------------------
-        # Translation
-        # -------------------------------------------------
+        # ----------------------------------------------------
+        # TRANSLATION
+        # ----------------------------------------------------
 
         progress(
             0.30,
             desc="Translating Chinese to Hindi..."
         )
 
-        hindi_segments = translate_to_hindi(
-            segments,
-            progress
+        hindi_segments = (
+            translate_chinese_to_hindi(
+                chinese_segments,
+                progress
+            )
         )
 
-        # -------------------------------------------------
-        # Hindi voice
-        # -------------------------------------------------
+        if not hindi_segments:
+
+            raise gr.Error(
+                "Chinese text could not be translated."
+            )
+
+        # ----------------------------------------------------
+        # HINDI VOICE
+        # ----------------------------------------------------
 
         progress(
-            0.50,
-            desc="Generating Hindi voice-over..."
+            0.45,
+            desc="Creating Hindi voice-over..."
         )
 
         create_hindi_audio(
             hindi_segments,
-            hindi_audio,
             duration,
-            progress
-        )
-
-        # -------------------------------------------------
-        # Final video
-        # -------------------------------------------------
-
-        create_vertical_video(
-            input_path,
             hindi_audio,
-            output_path,
+            job_dir,
             progress
         )
 
-        return str(output_path)
+        # ----------------------------------------------------
+        # RENDER
+        # ----------------------------------------------------
+
+        render_video(
+            input_video,
+            hindi_audio,
+            output_video,
+            progress
+        )
+
+        print(
+            "FINAL VIDEO:",
+            output_video
+        )
+
+        return str(output_video)
+
+    except gr.Error:
+        raise
 
     except Exception as e:
 
-        print("ERROR:", repr(e))
+        print(
+            "PROCESSING ERROR:",
+            repr(e)
+        )
 
         raise gr.Error(
-            f"Video processing failed:\n{str(e)}"
+            "Processing failed: "
+            + str(e)
         )
 
     finally:
 
-        # Cleanup temporary files
-        for file in [
-            input_path,
-            source_audio,
-            hindi_audio
-        ]:
-
-            try:
-                if file.exists():
-                    file.unlink()
-            except:
-                pass
+        # Delete large temporary files
+        cleanup_directory(
+            job_dir
+        )
 
 
-# =========================================================
-# GRADIO UI
-# =========================================================
+# ============================================================
+# UI
+# ============================================================
 
 DESCRIPTION = """
-# 🇨🇳 ➜ 🇮🇳 Chinese → Hindi Video Converter
+# 🇨🇳 → 🇮🇳 Chinese to Hindi Video Converter
 
-Chinese video upload करें और Hindi voice-over वाला **9:16 MP4** प्राप्त करें।
+Chinese video upload करें और Hindi voice-over वाला **9:16 MP4** बनाएं।
 
-### Features
-- Chinese speech recognition
-- Chinese → Hindi translation
-- Hindi voice-over
-- Original audio replace
-- 9:16 vertical video
-- MP4 output
+### क्या होगा?
+
+1. Chinese speech detect होगी
+2. Chinese → Hindi translation होगी
+3. Hindi voice-over बनेगा
+4. Original audio की जगह Hindi audio लगेगा
+5. Video 9:16 में render होगा
+
+**Recommended:** 15–20 minute videos
 """
 
 with gr.Blocks(
-    title="Chinese to Hindi Video Converter"
-) as demo:
+    title="Chinese → Hindi Video Converter"
+) as app:
 
-    gr.Markdown(DESCRIPTION)
+    gr.Markdown(
+        DESCRIPTION
+    )
 
     with gr.Row():
 
         with gr.Column():
 
             video_input = gr.Video(
-                label="Upload Chinese Video",
+                label="Chinese Video Upload",
                 sources=["upload"],
                 type="filepath"
             )
 
             convert_button = gr.Button(
-                "🇮🇳 Convert to Hindi Video",
-                variant="primary"
+                "🇮🇳 Convert to Hindi",
+                variant="primary",
+                size="lg"
             )
 
         with gr.Column():
@@ -580,19 +810,25 @@ with gr.Blocks(
     )
 
 
-# =========================================================
-# START SERVER
-# =========================================================
+# ============================================================
+# SERVER
+# ============================================================
 
 if __name__ == "__main__":
 
     port = int(
-        os.environ.get("PORT", 7860)
+        os.environ.get(
+            "PORT",
+            "7860"
+        )
     )
 
-    demo.queue(
-        max_size=5
-    ).launch(
+    app.queue(
+        max_size=2,
+        default_concurrency_limit=1
+    )
+
+    app.launch(
         server_name="0.0.0.0",
         server_port=port,
         show_error=True
