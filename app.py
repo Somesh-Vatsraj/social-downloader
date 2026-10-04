@@ -16,24 +16,20 @@ from gtts import gTTS
 
 BASE_DIR = Path("/tmp/chinese_hindi")
 
-UPLOAD_DIR = BASE_DIR / "uploads"
-AUDIO_DIR = BASE_DIR / "audio"
 OUTPUT_DIR = BASE_DIR / "outputs"
 
-for folder in [UPLOAD_DIR, AUDIO_DIR, OUTPUT_DIR]:
-    folder.mkdir(parents=True, exist_ok=True)
+OUTPUT_DIR.mkdir(
+    parents=True,
+    exist_ok=True
+)
 
-
-# IMPORTANT:
-# tiny model is used because Render Free/low-RAM
-# instances can run out of memory with "small".
 WHISPER_MODEL_NAME = "tiny"
 
 whisper_model = None
 
 
 # ============================================================
-# WHISPER - LAZY LOAD
+# WHISPER LAZY LOADING
 # ============================================================
 
 def get_whisper_model():
@@ -42,9 +38,9 @@ def get_whisper_model():
 
     if whisper_model is None:
 
-        print("========================================")
+        print("================================")
         print("Loading Whisper tiny model...")
-        print("========================================")
+        print("================================")
 
         whisper_model = WhisperModel(
             WHISPER_MODEL_NAME,
@@ -60,12 +56,15 @@ def get_whisper_model():
 
 
 # ============================================================
-# COMMAND RUNNER
+# RUN COMMAND
 # ============================================================
 
 def run_command(command):
 
-    print("Running:", " ".join(map(str, command)))
+    print(
+        "RUN:",
+        " ".join(str(x) for x in command)
+    )
 
     result = subprocess.run(
         command,
@@ -79,7 +78,7 @@ def run_command(command):
         print(result.stderr)
 
         raise RuntimeError(
-            result.stderr[-4000:]
+            result.stderr[-5000:]
         )
 
     return result
@@ -102,16 +101,22 @@ def get_video_duration(video):
         str(video)
     ])
 
-    return float(result.stdout.strip())
+    return float(
+        result.stdout.strip()
+    )
 
 
 # ============================================================
 # EXTRACT AUDIO
 # ============================================================
 
-def extract_audio(video, audio):
+def extract_audio(
+    video,
+    audio
+):
 
     run_command([
+
         "ffmpeg",
         "-y",
 
@@ -134,14 +139,19 @@ def extract_audio(video, audio):
 
 
 # ============================================================
-# CHINESE SPEECH TO TEXT
+# CHINESE SPEECH RECOGNITION
 # ============================================================
 
-def transcribe_chinese(audio, progress):
+def transcribe_chinese(
+    audio,
+    progress
+):
 
     model = get_whisper_model()
 
-    print("Starting Chinese transcription...")
+    print(
+        "Starting Chinese transcription..."
+    )
 
     segments, info = model.transcribe(
 
@@ -160,7 +170,7 @@ def transcribe_chinese(audio, progress):
         condition_on_previous_text=False
     )
 
-    result = []
+    results = []
 
     count = 0
 
@@ -171,11 +181,15 @@ def transcribe_chinese(audio, progress):
         if not text:
             continue
 
-        result.append({
+        results.append({
 
-            "start": float(segment.start),
+            "start": float(
+                segment.start
+            ),
 
-            "end": float(segment.end),
+            "end": float(
+                segment.end
+            ),
 
             "text": text
         })
@@ -183,23 +197,23 @@ def transcribe_chinese(audio, progress):
         count += 1
 
         progress(
-            0.15,
-            desc=f"Chinese speech detected: {count}"
+            0.20,
+            desc=f"Chinese speech: {count}"
         )
 
     print(
-        "Transcription segments:",
-        len(result)
+        "Segments:",
+        len(results)
     )
 
-    return result
+    return results
 
 
 # ============================================================
-# CHINESE -> HINDI
+# TRANSLATE CHINESE TO HINDI
 # ============================================================
 
-def translate_chinese_to_hindi(
+def translate_to_hindi(
     segments,
     progress
 ):
@@ -209,25 +223,32 @@ def translate_chinese_to_hindi(
         target="hi"
     )
 
-    result = []
+    results = []
 
-    total = len(segments)
+    total = len(
+        segments
+    )
 
-    print("Starting translation...")
+    print(
+        "Starting translation..."
+    )
 
-    for index, segment in enumerate(segments):
+    for index, segment in enumerate(
+        segments
+    ):
 
-        chinese = segment["text"].strip()
+        chinese_text = (
+            segment["text"]
+            .strip()
+        )
 
-        if not chinese:
+        if not chinese_text:
             continue
-
-        hindi = ""
 
         try:
 
-            hindi = translator.translate(
-                chinese
+            hindi_text = translator.translate(
+                chinese_text
             )
 
         except Exception as e:
@@ -237,43 +258,54 @@ def translate_chinese_to_hindi(
                 e
             )
 
-            # If translation fails, skip this segment.
             continue
 
-        if hindi:
+        if hindi_text:
 
-            result.append({
+            results.append({
 
                 "start": segment["start"],
 
                 "end": segment["end"],
 
-                "text": hindi.strip()
+                "text": hindi_text.strip()
             })
 
-        percent = 0.25 + (
-            0.20 *
-            ((index + 1) / max(total, 1))
+        percent = (
+            0.25 +
+            (
+                0.20 *
+                (
+                    (index + 1) /
+                    max(total, 1)
+                )
+            )
         )
 
         progress(
             percent,
-            desc=f"Translating: {index + 1}/{total}"
+            desc=(
+                f"Translation "
+                f"{index + 1}/{total}"
+            )
         )
 
     print(
-        "Translated segments:",
-        len(result)
+        "Hindi segments:",
+        len(results)
     )
 
-    return result
+    return results
 
 
 # ============================================================
-# CREATE ONE TTS FILE
+# TEXT TO HINDI VOICE
 # ============================================================
 
-def create_tts(text, filename):
+def make_voice(
+    text,
+    output_file
+):
 
     tts = gTTS(
         text=text,
@@ -281,7 +313,9 @@ def create_tts(text, filename):
         slow=False
     )
 
-    tts.save(str(filename))
+    tts.save(
+        str(output_file)
+    )
 
 
 # ============================================================
@@ -299,37 +333,43 @@ def create_hindi_audio(
     if not segments:
 
         raise RuntimeError(
-            "No Hindi text was generated."
+            "No Hindi text available."
         )
 
-    generated = []
+    voice_files = []
 
-    total = len(segments)
+    total = len(
+        segments
+    )
 
-    print("Generating Hindi voice...")
+    print(
+        "Creating Hindi voice..."
+    )
 
-    for index, segment in enumerate(segments):
+    for index, segment in enumerate(
+        segments
+    ):
 
         text = segment["text"].strip()
 
         if not text:
             continue
 
-        tts_file = (
+        voice_file = (
             job_dir /
-            f"voice_{index:05d}.mp3"
+            f"voice_{index}.mp3"
         )
 
         try:
 
-            create_tts(
+            make_voice(
                 text,
-                tts_file
+                voice_file
             )
 
-            generated.append({
+            voice_files.append({
 
-                "file": tts_file,
+                "file": voice_file,
 
                 "start": segment["start"]
             })
@@ -337,28 +377,32 @@ def create_hindi_audio(
         except Exception as e:
 
             print(
-                "TTS failed:",
+                "Voice error:",
                 e
             )
 
-        percent = 0.45 + (
-            0.25 *
-            ((index + 1) / max(total, 1))
-        )
-
         progress(
-            percent,
-            desc=f"Creating Hindi voice: {index + 1}/{total}"
+            0.45 + (
+                0.25 *
+                (
+                    (index + 1) /
+                    max(total, 1)
+                )
+            ),
+            desc=(
+                f"Hindi voice "
+                f"{index + 1}/{total}"
+            )
         )
 
-    if not generated:
+    if not voice_files:
 
         raise RuntimeError(
-            "Hindi voice could not be generated."
+            "Hindi voice generation failed."
         )
 
     # --------------------------------------------------------
-    # Build ffmpeg command
+    # FFMPEG INPUTS
     # --------------------------------------------------------
 
     command = [
@@ -366,47 +410,51 @@ def create_hindi_audio(
         "-y"
     ]
 
-    # Add every generated voice file
-    for item in generated:
+    for item in voice_files:
 
         command.extend([
             "-i",
             str(item["file"])
         ])
 
-    filter_parts = []
+    filters = []
 
-    for index, item in enumerate(generated):
+    for index, item in enumerate(
+        voice_files
+    ):
 
-        delay = max(
+        delay_ms = max(
             0,
-            int(item["start"] * 1000)
+            int(
+                item["start"] * 1000
+            )
         )
 
-        filter_parts.append(
+        filters.append(
             f"[{index}:a]"
-            f"adelay={delay}:all=1,"
+            f"adelay={delay_ms}:all=1,"
             f"aresample=44100"
             f"[a{index}]"
         )
 
     inputs = "".join(
         f"[a{i}]"
-        for i in range(len(generated))
+        for i in range(
+            len(voice_files)
+        )
     )
 
-    filter_parts.append(
+    filters.append(
         f"{inputs}"
         f"amix="
-        f"inputs={len(generated)}:"
+        f"inputs={len(voice_files)}:"
         f"duration=longest:"
-        f"dropout_transition=0,"
-        f"loudnorm=I=-16:TP=-1.5:LRA=11"
+        f"dropout_transition=0"
         f"[out]"
     )
 
     filter_complex = ";".join(
-        filter_parts
+        filters
     )
 
     command.extend([
@@ -435,11 +483,8 @@ def create_hindi_audio(
         str(output_audio)
     ])
 
-    run_command(command)
-
-    print(
-        "Hindi audio created:",
-        output_audio
+    run_command(
+        command
     )
 
 
@@ -459,13 +504,6 @@ def render_video(
         desc="Rendering 9:16 video..."
     )
 
-    # Center crop.
-    #
-    # This converts the source into 1080x1920.
-    #
-    # If the original video is landscape,
-    # the sides will be cropped.
-
     video_filter = (
         "scale=1080:1920:"
         "force_original_aspect_ratio=increase,"
@@ -476,7 +514,6 @@ def render_video(
     run_command([
 
         "ffmpeg",
-
         "-y",
 
         "-i",
@@ -485,7 +522,7 @@ def render_video(
         "-i",
         str(hindi_audio),
 
-        # Video from original
+        # Original video
         "-map",
         "0:v:0",
 
@@ -532,14 +569,16 @@ def render_video(
 # CLEANUP
 # ============================================================
 
-def cleanup_directory(directory):
+def cleanup(
+    path
+):
 
     try:
 
-        if directory.exists():
+        if path.exists():
 
             shutil.rmtree(
-                directory,
+                path,
                 ignore_errors=True
             )
 
@@ -552,7 +591,7 @@ def cleanup_directory(directory):
 
 
 # ============================================================
-# MAIN
+# MAIN CONVERTER
 # ============================================================
 
 def convert_video(
@@ -563,7 +602,7 @@ def convert_video(
     if not video_file:
 
         raise gr.Error(
-            "Please upload a Chinese video."
+            "Please upload a video."
         )
 
     job_id = uuid.uuid4().hex
@@ -596,13 +635,13 @@ def convert_video(
 
     output_video = (
         OUTPUT_DIR /
-        f"hindivideo_{job_id}.mp4"
+        f"hindi_{job_id}.mp4"
     )
 
     try:
 
         # ----------------------------------------------------
-        # COPY INPUT
+        # COPY VIDEO
         # ----------------------------------------------------
 
         progress(
@@ -624,20 +663,18 @@ def convert_video(
         )
 
         print(
-            "Video duration:",
-            duration,
-            "seconds"
+            "Duration:",
+            duration
         )
 
-        # Maximum 30 minutes
         if duration > 30 * 60:
 
             raise gr.Error(
-                "Maximum supported video length is 30 minutes."
+                "Maximum video length is 30 minutes."
             )
 
         # ----------------------------------------------------
-        # AUDIO
+        # EXTRACT AUDIO
         # ----------------------------------------------------
 
         progress(
@@ -651,7 +688,7 @@ def convert_video(
         )
 
         # ----------------------------------------------------
-        # TRANSCRIPTION
+        # TRANSCRIBE
         # ----------------------------------------------------
 
         progress(
@@ -669,20 +706,20 @@ def convert_video(
         if not chinese_segments:
 
             raise gr.Error(
-                "Chinese speech was not detected."
+                "Chinese speech not detected."
             )
 
         # ----------------------------------------------------
-        # TRANSLATION
+        # TRANSLATE
         # ----------------------------------------------------
 
         progress(
             0.30,
-            desc="Translating Chinese to Hindi..."
+            desc="Translating into Hindi..."
         )
 
         hindi_segments = (
-            translate_chinese_to_hindi(
+            translate_to_hindi(
                 chinese_segments,
                 progress
             )
@@ -691,7 +728,7 @@ def convert_video(
         if not hindi_segments:
 
             raise gr.Error(
-                "Chinese text could not be translated."
+                "Hindi translation failed."
             )
 
         # ----------------------------------------------------
@@ -712,7 +749,7 @@ def convert_video(
         )
 
         # ----------------------------------------------------
-        # RENDER
+        # FINAL VIDEO
         # ----------------------------------------------------
 
         render_video(
@@ -723,70 +760,75 @@ def convert_video(
         )
 
         print(
-            "FINAL VIDEO:",
+            "DONE:",
             output_video
         )
 
-        return str(output_video)
+        return str(
+            output_video
+        )
 
     except gr.Error:
+
         raise
 
     except Exception as e:
 
         print(
-            "PROCESSING ERROR:",
+            "ERROR:",
             repr(e)
         )
 
         raise gr.Error(
-            "Processing failed: "
-            + str(e)
+            str(e)
         )
 
     finally:
 
-        # Delete large temporary files
-        cleanup_directory(
+        cleanup(
             job_dir
         )
 
 
 # ============================================================
-# UI
+# USER INTERFACE
 # ============================================================
 
-DESCRIPTION = """
+with gr.Blocks(
+    title="Chinese → Hindi Video"
+) as app:
+
+    gr.Markdown(
+        """
 # 🇨🇳 → 🇮🇳 Chinese to Hindi Video Converter
 
 Chinese video upload करें और Hindi voice-over वाला **9:16 MP4** बनाएं।
 
-### क्या होगा?
+### Automatic Process
 
-1. Chinese speech detect होगी
-2. Chinese → Hindi translation होगी
-3. Hindi voice-over बनेगा
-4. Original audio की जगह Hindi audio लगेगा
-5. Video 9:16 में render होगा
+**Chinese Video**
+→ Chinese Speech
+→ Hindi Translation
+→ Hindi Voice
+→ 9:16 Video
+→ **Hindi MP4**
 
-**Recommended:** 15–20 minute videos
+15–20 मिनट के वीडियो के लिए बनाया गया है।
 """
-
-with gr.Blocks(
-    title="Chinese → Hindi Video Converter"
-) as app:
-
-    gr.Markdown(
-        DESCRIPTION
     )
 
     with gr.Row():
 
         with gr.Column():
 
-            video_input = gr.Video(
-                label="Chinese Video Upload",
-                sources=["upload"],
+            video_input = gr.File(
+                label="📤 Upload Chinese MP4",
+                file_types=[
+                    ".mp4",
+                    ".mov",
+                    ".mkv",
+                    ".webm"
+                ],
                 type="filepath"
             )
 
@@ -798,9 +840,11 @@ with gr.Blocks(
 
         with gr.Column():
 
-            output_video = gr.Video(
-                label="Hindi 9:16 Video",
-                autoplay=False
+            output_video = gr.File(
+                label="📥 Download Hindi Video",
+                file_types=[
+                    ".mp4"
+                ]
             )
 
     convert_button.click(
@@ -811,7 +855,7 @@ with gr.Blocks(
 
 
 # ============================================================
-# SERVER
+# START SERVER
 # ============================================================
 
 if __name__ == "__main__":
