@@ -1,5 +1,4 @@
-Flask==3.0.3
-requests==2.32.3
-faster-whisper==1.0.3
+gradio==5.49.1
+faster-whisper==1.2.0
 deep-translator==1.11.4
-edge-tts==6.1.12
+gTTS==2.5.4
