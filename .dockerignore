@@ -7,5 +7,3 @@ __pycache__
 .env
 .venv
 venv
-Dockerfile
-README.md
