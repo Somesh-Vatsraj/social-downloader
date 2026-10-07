@@ -6,15 +6,24 @@ RUN apt-get update && \
     python3-pip \
     ffmpeg \
     curl \
+    unzip \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip3 install --break-system-packages -U yt-dlp
+# Install Deno
+RUN curl -fsSL https://deno.land/install.sh | sh
+
+ENV PATH="/root/.deno/bin:${PATH}"
+
+# Install latest yt-dlp + EJS support
+RUN pip3 install --break-system-packages -U "yt-dlp[default]"
 
 WORKDIR /app
 
 COPY . /app
 
-RUN mkdir -p /app/downloads
+RUN mkdir -p /app/downloads && \
+    chmod 755 /app/downloads
 
 EXPOSE 10000
 
