@@ -1,23 +1,21 @@
-FROM python:3.12-slim
+FROM php:8.2-cli
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        ffmpeg \
-        ca-certificates \
+RUN apt-get update && \
+    apt-get install -y \
+    python3 \
+    python3-pip \
+    ffmpeg \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
-WORKDIR /app
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-COPY app.py .
+RUN pip3 install --break-system-packages -U yt-dlp
 
-ENV PYTHONUNBUFFERED=1 PORT=10000
+WORKDIR /app
+
+COPY . /app
+
+RUN mkdir -p /app/downloads
+
 EXPOSE 10000
 
-CMD gunicorn app:app \
-    --bind 0.0.0.0:${PORT} \
-    --worker-class gthread \
-    --workers 2 \
-    --threads 4 \
-    --timeout 600 \
-    --access-logfile - \
-    --error-logfile -
+CMD ["php", "-S", "0.0.0.0:10000", "-t", "/app"]
