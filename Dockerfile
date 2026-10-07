@@ -1,30 +1,45 @@
-# Use an official Python runtime as a parent image
 FROM python:3.12-slim
 
-# Set the working directory
-WORKDIR /app
-
-# Install system dependencies: Node.js, npm, and ffmpeg
-RUN apt-get update && apt-get install -y \
-    nodejs \
-    npm \
-    ffmpeg \
+# System deps: ffmpeg + curl + deno ke liye unzip
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ffmpeg \
+        curl \
+        unzip \
+        ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Install the bgutil PO Token provider globally using npm
-# This is the service that will run in the background to generate PO tokens.
-RUN npm install -g bgutil-ytdlp-pot-provider
+# Deno install (yt-dlp JS runtime)
+RUN curl -fsSL https://deno.land/install.sh | DENO_INSTALL=/usr/local sh \
+    && ln -sf /usr/local/bin/deno /usr/bin/deno \
+    && deno --version
 
-# Copy the requirements file and install Python dependencies
+WORKDIR /app
+
+# Python deps
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip \
+    && pip install --no-cache-dir -r requirements.txt
 
-# Copy the application code
-COPY . .
+# yt-dlp ko nightly pe update (stable 403 deta hai)
+RUN pip install --no-cache-dir -U --pre "yt-dlp[default]"
 
-# Expose the port the app runs on
+# App code
+COPY app.py .
+
+ENV PYTHONUNBUFFERED=1 \
+    PORT=10000 \
+    DENO_DIR=/tmp/deno
+
 EXPOSE 10000
 
-# Command to run the application
-# We start the PO token provider server in the background, then start the Flask app.
-CMD node /usr/local/lib/node_modules/bgutil-ytdlp-pot-provider/server/build/main.js & python app.py
+# Gunicorn: streaming ke liye gthread + long timeout
+CMD gunicorn app:app \
+    --bind 0.0.0.0:${PORT} \
+    --worker-class gthread \
+    --workers 2 \
+    --threads 4 \
+    --timeout 600 \
+    --graceful-timeout 120 \
+    --keep-alive 65 \
+    --access-logfile - \
+    --error-logfile -
