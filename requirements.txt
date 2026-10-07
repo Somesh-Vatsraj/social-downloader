@@ -1,3 +1,4 @@
-Flask
-pytubefix
-gunicorn
+Flask==3.0.3
+flask-cors==4.0.1
+yt-dlp
+requests
