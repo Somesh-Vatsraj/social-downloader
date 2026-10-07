@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: yt-downloader
+    runtime: docker
+    plan: starter          # free tier pe 512MB RAM — ffmpeg 1080p pe crash kar sakta hai
+    region: singapore      # apne users ke najdeek rakho
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: DENO_DIR
+        value: /tmp/deno
