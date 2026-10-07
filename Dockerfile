@@ -1,17 +1,40 @@
-FROM python:3.12-slim
+# Use an official PHP runtime as a parent image
+FROM php:8.4-apache
 
-WORKDIR /app
+# Set the working directory
+WORKDIR /var/www/html
 
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PORT=10000
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    git \
+    curl \
+    libpng-dev \
+    libonig-dev \
+    libxml2-dev \
+    zip \
+    unzip \
+    python3 \
+    python3-pip \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt .
+# Install PHP extensions
+RUN docker-php-ext-install pdo_mysql mbstring exif pcntl bcmath gd
 
-RUN pip install --no-cache-dir -r requirements.txt
+# Install yt-dlp
+RUN pip3 install --upgrade yt-dlp
 
-COPY app.py .
+# Enable Apache mod_rewrite
+RUN a2enmod rewrite
 
-EXPOSE 10000
+# Copy the application code
+COPY . /var/www/html
 
-CMD ["sh", "-c", "gunicorn --workers 1 --threads 4 --timeout 120 --bind 0.0.0.0:${PORT} app:app"]
+# Set permissions for Apache
+RUN chown -R www-data:www-data /var/www/html
+
+# Expose port 80 (Render will map its dynamic PORT to this)
+EXPOSE 80
+
+# Start Apache in the foreground
+CMD ["apache2-foreground"]
