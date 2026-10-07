@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-app.py — YouTube extractor + streamer (PHP-style Innertube, no yt-dlp)
+app.py — YouTube extractor + streamer (Multi-client Innertube + visitorData)
 
 Endpoints:
     GET /                        -> HTML UI
     GET /health                  -> health check
     GET /info?url=...            -> JSON (formats + links)
-    GET /stream360?url=...       -> 360p stream (itag 18, combined → direct proxy)
-    GET /stream720?url=...       -> 720p stream (itag 22 ya ffmpeg merge)
-    GET /audio?url=...&fmt=m4a   -> audio (itag 140 / 251)
+    GET /stream360?url=...       -> 360p stream (combined → direct proxy)
+    GET /stream720?url=...       -> 720p stream (ffmpeg merge)
+    GET /audio?url=...&fmt=m4a   -> audio (m4a / mp3)
 """
 
 import os
@@ -18,7 +18,7 @@ import sys
 import json
 import shutil
 import subprocess
-from urllib.parse import unquote, urlencode, parse_qs
+from urllib.parse import unquote
 
 from flask import (
     Flask, request, Response, jsonify,
@@ -40,17 +40,42 @@ app = Flask(__name__)
 FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
 CHUNK  = 65536
 
-# ANDROID client — PHP wala same config (May 2026, tested)
-ANDROID_UA      = "com.google.android.youtube/21.19.286 (Linux; U; Android 11) gzip"
-ANDROID_VER     = "21.19.286"
-ANDROID_CLIENT  = "ANDROID"
-ANDROID_ID      = "3"
-
 INNERTUBE_URL = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false"
 
 
 # ============================================================
-# 1. VIDEO ID
+# 1. MULTI-CLIENT ROTATION (datacenter IP fix)
+# ============================================================
+CLIENTS = [
+    # TV Embedded — sabse kam restricted, embed URL use karta hai
+    {
+        "clientName": "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
+        "clientVersion": "2.0",
+        "clientId": "85",
+        "ua": "Mozilla/5.0 (PlayStation; PlayStation 4/12.00) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Safari/605.1.15",
+        "embed": True,
+    },
+    # ANDROID_VR — JS-less, n-param deciphering nahi chahiye
+    {
+        "clientName": "ANDROID_VR",
+        "clientVersion": "1.62.27",
+        "clientId": "28",
+        "ua": "com.google.android.apps.youtube.vr.oculus/1.62.27 (Linux; U; Android 12L) gzip",
+        "embed": False,
+    },
+    # MWEB — mobile web fallback
+    {
+        "clientName": "MWEB",
+        "clientVersion": "2.20250310.01.00",
+        "clientId": "2",
+        "ua": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+        "embed": False,
+    },
+]
+
+
+# ============================================================
+# 2. VIDEO ID
 # ============================================================
 YT_RE = re.compile(
     r'(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/|youtube\.com/embed/)'
@@ -63,53 +88,101 @@ def get_video_id(url: str) -> str | None:
 
 
 # ============================================================
-# 2. INNERTUBE CALL (ANDROID client)
+# 3. VISITOR DATA — watch page se nikaalo
+# ============================================================
+def fetch_visitor_data(video_id: str, ua: str) -> str | None:
+    """Watch page se visitorData nikaalo. Keyless anonymous calls isi se
+    'Sign in to confirm you're not a bot' se bach jaate hain."""
+    try:
+        r = requests.get(
+            f"https://www.youtube.com/watch?v={video_id}",
+            headers={"User-Agent": ua, "Accept-Language": "en-US,en;q=0.9"},
+            timeout=15,
+        )
+        m = re.search(r'"visitorData":"([^"]+)"', r.text)
+        if m:
+            return m.group(1)
+    except Exception:
+        pass
+    return None
+
+
+# ============================================================
+# 4. INNERTUBE CALL — client rotation + visitorData
 # ============================================================
 def call_innertube(video_id: str) -> dict:
-    payload = {
-        "context": {
-            "client": {
-                "hl": "en",
-                "gl": "US",
-                "clientName": ANDROID_CLIENT,
-                "clientVersion": ANDROID_VER,
-                "androidSdkVersion": 30,
-                "osName": "Android",
-                "osVersion": "11",
-                "userAgent": ANDROID_UA,
-            },
-            "request": {"useSsl": True},
-        },
-        "videoId": video_id,
-        "contentCheckOk": True,
-        "racyCheckOk": True,
-    }
-    headers = {
-        "Content-Type": "application/json",
-        "User-Agent": ANDROID_UA,
-        "X-YouTube-Client-Name": ANDROID_ID,
-        "X-YouTube-Client-Version": ANDROID_VER,
-        "Origin": "https://www.youtube.com",
-    }
-    r = requests.post(INNERTUBE_URL, data=json.dumps(payload),
-                      headers=headers, timeout=20)
-    if r.status_code != 200:
-        raise RuntimeError(f"YouTube returned HTTP {r.status_code}: {r.text[:300]}")
-    return r.json()
+    errors = []
+    for c in CLIENTS:
+        try:
+            # Step 1: visitorData fetch karo
+            visitor_data = fetch_visitor_data(video_id, c["ua"])
+
+            # Step 2: payload banao
+            client_ctx = {
+                "hl": "en", "gl": "US",
+                "clientName": c["clientName"],
+                "clientVersion": c["clientVersion"],
+                "userAgent": c["ua"],
+            }
+            if visitor_data:
+                client_ctx["visitorData"] = visitor_data
+
+            payload = {
+                "context": {
+                    "client": client_ctx,
+                    "request": {"useSsl": True},
+                },
+                "videoId": video_id,
+                "contentCheckOk": True,
+                "racyCheckOk": True,
+            }
+            if c["embed"]:
+                payload["context"]["thirdParty"] = {
+                    "embedUrl": f"https://www.youtube.com/embed/{video_id}"
+                }
+
+            headers = {
+                "Content-Type": "application/json",
+                "User-Agent": c["ua"],
+                "X-YouTube-Client-Name": c["clientId"],
+                "X-YouTube-Client-Version": c["clientVersion"],
+                "Origin": "https://www.youtube.com",
+            }
+
+            r = requests.post(INNERTUBE_URL, data=json.dumps(payload),
+                              headers=headers, timeout=20)
+
+            if r.status_code != 200:
+                errors.append(f"{c['clientName']}: HTTP {r.status_code}")
+                continue
+
+            data = r.json()
+            status = data.get("playabilityStatus", {}).get("status", "")
+            reason = data.get("playabilityStatus", {}).get("reason", "")
+
+            if status == "OK":
+                data["_client_used"] = c["clientName"]
+                return data
+
+            errors.append(f"{c['clientName']}: {status} — {reason}")
+
+        except Exception as e:
+            errors.append(f"{c['clientName']}: {e}")
+            continue
+
+    raise RuntimeError("All clients failed. " + " | ".join(errors))
 
 
 # ============================================================
-# 3. HELPERS
+# 5. HELPERS
 # ============================================================
 def decode_signature_cipher(cipher: str) -> str | None:
-    """PHP code jaisa — 'url=' nikalke double-url-decode karo."""
     if not cipher:
         return None
     idx = cipher.find("url=")
     if idx == -1:
         return None
     raw = cipher[idx + 4:]
-    # cipher string me '&s=' ya '&sp=' se pehle url hota hai
     amp = raw.find("&")
     if amp != -1:
         raw = raw[:amp]
@@ -135,7 +208,6 @@ def normalize_format(f: dict) -> dict | None:
     return {
         "itag":           f.get("itag"),
         "url":            url,
-        "mime":           mime,
         "type":           "video" if is_v else ("audio" if is_a else "unknown"),
         "has_video":      is_v,
         "has_audio":      is_a or (is_v and f.get("audioQuality") is not None),
@@ -146,7 +218,6 @@ def normalize_format(f: dict) -> dict | None:
         "height":         f.get("height"),
         "fps":            f.get("fps"),
         "bitrate":        f.get("bitrate"),
-        "audio_bitrate":  f.get("averageBitrate") or f.get("bitrate"),
         "content_length": f.get("contentLength"),
     }
 
@@ -154,16 +225,21 @@ def normalize_format(f: dict) -> dict | None:
 def extract_all_formats(data: dict) -> list[dict]:
     sd = data.get("streamingData", {})
     raw = (sd.get("formats") or []) + (sd.get("adaptiveFormats") or [])
-    out = []
-    for f in raw:
-        n = normalize_format(f)
-        if n:
-            out.append(n)
-    return out
+    return [n for f in raw if (n := normalize_format(f))]
+
+
+def pick_combined(formats, q, container="mp4"):
+    pool = [f for f in formats
+            if f["has_video"] and f["has_audio"]
+            and f["height"] and f["height"] <= q
+            and f["container"] == container]
+    if not pool:
+        return None
+    best = max(f["height"] for f in pool)
+    return next(f for f in pool if f["height"] == best)
 
 
 def pick_video(formats, q, container="mp4"):
-    """Adaptive video-only pick."""
     pool = [f for f in formats
             if f["has_video"] and not f["has_audio"]
             and f["height"] and f["height"] <= q
@@ -173,53 +249,36 @@ def pick_video(formats, q, container="mp4"):
     best = max(f["height"] for f in pool)
     pool = [f for f in pool if f["height"] == best]
     if container == "mp4":
-        pool.sort(key=lambda f: (
-            0 if f["codec"].startswith("avc1") else 1,
-            -(f["bitrate"] or 0)))
+        pool.sort(key=lambda f: (0 if f["codec"].startswith("avc1") else 1,
+                                 -(f["bitrate"] or 0)))
     else:
         pool.sort(key=lambda f: -(f["bitrate"] or 0))
     return pool[0]
 
 
 def pick_audio(formats, container="mp4"):
-    """Audio-only pick (m4a ya webm)."""
     ext = "mp4" if container == "mp4" else "webm"
     pool = [f for f in formats
             if f["has_audio"] and not f["has_video"]
             and f["container"] == ext]
     if not pool:
         return None
-    pool.sort(key=lambda f: (
-        0 if f["codec"].startswith("mp4a.40.2") else 1,
-        -(f["bitrate"] or 0)))
-    return pool[0]
-
-
-def pick_combined(formats, q, container="mp4"):
-    """Audio+video ek URL (itag 18, 22)."""
-    pool = [f for f in formats
-            if f["has_video"] and f["has_audio"]
-            and f["height"] and f["height"] <= q
-            and f["container"] == container]
-    if not pool:
-        return None
-    best = max(f["height"] for f in pool)
-    pool = [f for f in pool if f["height"] == best]
+    pool.sort(key=lambda f: (0 if f["codec"].startswith("mp4a.40.2") else 1,
+                             -(f["bitrate"] or 0)))
     return pool[0]
 
 
 # ============================================================
-# 4. STREAM HELPERS
+# 6. STREAM HELPERS
 # ============================================================
 YT_HEADERS = {
     "Origin": "https://www.youtube.com",
     "Referer": "https://www.youtube.com/",
-    "User-Agent": ANDROID_UA,
+    "User-Agent": "Mozilla/5.0 (PlayStation; PlayStation 4/12.00) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Safari/605.1.15",
 }
 
 
 def proxy_direct(media, ctype="video/mp4", filename=None):
-    """Combined (audio+video) URL ko direct proxy — 360p ke liye."""
     rng = request.headers.get("Range")
     headers = dict(YT_HEADERS)
     if rng:
@@ -252,10 +311,9 @@ def proxy_direct(media, ctype="video/mp4", filename=None):
 
 
 def ffmpeg_pipe(video_media, audio_media, fmt="mp4", filename=None):
-    """Video + audio ko ffmpeg se live merge karke pipe (720p adaptive ke liye)."""
     hdr_v = (f"Origin: https://www.youtube.com\r\n"
              f"Referer: https://www.youtube.com/\r\n"
-             f"User-Agent: {ANDROID_UA}\r\n")
+             f"User-Agent: {YT_HEADERS['User-Agent']}\r\n")
     hdr_a = hdr_v
 
     if fmt == "webm":
@@ -306,10 +364,9 @@ def ffmpeg_pipe(video_media, audio_media, fmt="mp4", filename=None):
 
 
 def ffmpeg_audio_pipe(audio_media, fmt="m4a", filename=None):
-    """Audio-only pipe (m4a copy ya mp3 re-encode)."""
     hdr = (f"Origin: https://www.youtube.com\r\n"
            f"Referer: https://www.youtube.com/\r\n"
-           f"User-Agent: {ANDROID_UA}\r\n")
+           f"User-Agent: {YT_HEADERS['User-Agent']}\r\n")
 
     src_codec = audio_media.get("codec", "")
     src_ext   = audio_media.get("container", "")
@@ -359,14 +416,14 @@ def ffmpeg_audio_pipe(audio_media, fmt="m4a", filename=None):
 
 
 # ============================================================
-# 5. ROUTES
+# 7. ROUTES
 # ============================================================
 @app.route("/health")
 def health():
     return jsonify({
         "ok": True,
         "ffmpeg": FFMPEG,
-        "client": f"{ANDROID_CLIENT} {ANDROID_VER}",
+        "clients": [c["clientName"] for c in CLIENTS],
     })
 
 
@@ -390,20 +447,12 @@ def route_info():
     except Exception as e:
         return jsonify({"success": False, "message": str(e) or repr(e)}), 502
 
-    status = data.get("playabilityStatus", {}).get("status", "")
-    reason = data.get("playabilityStatus", {}).get("reason", "Unknown")
-    if status != "OK":
-        return jsonify({"success": False,
-                        "message": f"NO Data: {reason}",
-                        "status": status}), 502
-
     details = data.get("videoDetails", {})
     formats = extract_all_formats(data)
 
     def self_url(endpoint, **kw):
         return url_for(endpoint, _external=True, **kw)
 
-    # dedupe by itag
     seen = set()
     media_out = []
     for f in formats:
@@ -411,9 +460,7 @@ def route_info():
         if key in seen:
             continue
         seen.add(key)
-        row = dict(f)
-        row.pop("mime", None)
-        media_out.append(row)
+        media_out.append(f)
 
     video_list = [r for r in media_out if r["has_video"]]
     audio_list = [r for r in media_out if r["has_audio"] and not r["has_video"]]
@@ -424,6 +471,7 @@ def route_info():
         "title":         details.get("title", ""),
         "author":        details.get("author", ""),
         "duration":      int(details.get("lengthSeconds", 0) or 0),
+        "client_used":   data.get("_client_used"),
         "thumbnails": [
             {"url": t.get("url"),
              "width": t.get("width"),
@@ -432,8 +480,8 @@ def route_info():
             if t.get("url")
         ],
         "stream_links": {
-            "360p":  self_url("route_stream360", url=url),
-            "720p":  self_url("route_stream720", url=url),
+            "360p":      self_url("route_stream360", url=url),
+            "720p":      self_url("route_stream720", url=url),
             "audio_m4a": self_url("route_audio", url=url, fmt="m4a"),
             "audio_mp3": self_url("route_audio", url=url, fmt="mp3"),
         },
@@ -446,7 +494,6 @@ def route_info():
 
 @app.route("/stream360")
 def route_stream360():
-    """360p — itag 18 (combined). Direct proxy, super fast."""
     url = (request.args.get("url") or "").strip()
     video_id = get_video_id(url)
     if not video_id:
@@ -457,14 +504,8 @@ def route_stream360():
     except Exception as e:
         return jsonify({"success": False, "message": str(e) or repr(e)}), 502
 
-    if data.get("playabilityStatus", {}).get("status") != "OK":
-        return jsonify({"success": False, "message": "Video not playable"}), 502
-
     formats = extract_all_formats(data)
-    pick = pick_combined(formats, 360, "mp4")
-    if not pick:
-        # fallback — 360p tak ka best
-        pick = pick_combined(formats, 480, "mp4")
+    pick = pick_combined(formats, 360, "mp4") or pick_combined(formats, 480, "mp4")
     if not pick:
         return jsonify({"success": False, "message": "360p combined nahi mila"}), 404
 
@@ -473,7 +514,6 @@ def route_stream360():
 
 @app.route("/stream720")
 def route_stream720():
-    """720p — combined (itag 22) mile to direct; warna ffmpeg merge."""
     url = (request.args.get("url") or "").strip()
     fmt = (request.args.get("fmt") or "mp4").lower()
     if fmt not in ("mp4", "webm"):
@@ -487,17 +527,12 @@ def route_stream720():
     except Exception as e:
         return jsonify({"success": False, "message": str(e) or repr(e)}), 502
 
-    if data.get("playabilityStatus", {}).get("status") != "OK":
-        return jsonify({"success": False, "message": "Video not playable"}), 502
-
     formats = extract_all_formats(data)
 
-    # pehle combined try karo (itag 22 — 720p combined, sirf kuch videos me milta hai)
     comb = pick_combined(formats, 720, fmt)
     if comb:
         return proxy_direct(comb, "video/mp4", f"{video_id}_720p.{fmt}")
 
-    # warna adaptive: video + audio alag → ffmpeg merge
     v = pick_video(formats, 720, fmt)
     a = pick_audio(formats, "mp4" if fmt == "mp4" else "webm")
     if not v or not a:
@@ -510,7 +545,6 @@ def route_stream720():
 
 @app.route("/audio")
 def route_audio():
-    """Audio — m4a copy ya mp3 re-encode."""
     url = (request.args.get("url") or "").strip()
     fmt = (request.args.get("fmt") or "m4a").lower()
     if fmt not in ("m4a", "mp3"):
@@ -524,9 +558,6 @@ def route_audio():
     except Exception as e:
         return jsonify({"success": False, "message": str(e) or repr(e)}), 502
 
-    if data.get("playabilityStatus", {}).get("status") != "OK":
-        return jsonify({"success": False, "message": "Video not playable"}), 502
-
     formats = extract_all_formats(data)
     a = pick_audio(formats, "mp4") or pick_audio(formats, "webm")
     if not a:
@@ -537,14 +568,14 @@ def route_audio():
 
 
 # ============================================================
-# 6. HTML UI
+# 8. HTML UI
 # ============================================================
 INDEX_HTML = """
 <!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>YT Downloader (Python)</title>
+<title>YT Downloader (Multi-Client)</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
   body{font-family:system-ui,Arial;max-width:780px;margin:20px auto;padding:0 14px;color:#111}
@@ -560,7 +591,7 @@ INDEX_HTML = """
 </style>
 </head>
 <body>
-<h1>YouTube Downloader (Python · Innertube)</h1>
+<h1>YouTube Downloader (Multi-Client Innertube)</h1>
 <div class="row"><input id="url" placeholder="https://youtu.be/XXXX"></div>
 <div class="row"><button onclick="go()">Load</button></div>
 <div id="out"></div>
@@ -587,8 +618,7 @@ async function go(){
   html += '<a href="'+s['audio_m4a']+'">M4A</a>';
   html += '<a href="'+s['audio_mp3']+'">MP3</a>';
   html += '</div>';
-  html += '<h4>Formats ('+j.total_formats+')</h4>';
-  html += '<pre>'+JSON.stringify({video:j.video_formats.length,audio:j.audio_formats.length},null,2)+'</pre>';
+  html += '<h4>Client used: '+(j.client_used||'?')+'</h4>';
   document.getElementById('out').innerHTML = html;
 }
 </script>
@@ -598,7 +628,7 @@ async function go(){
 
 
 # ============================================================
-# 7. MAIN
+# 9. MAIN
 # ============================================================
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
