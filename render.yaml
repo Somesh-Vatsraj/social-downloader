@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: youtube-downloader
+    env: docker
+    plan: free # Or starter/standard for persistent disks
+    region: oregon
+    dockerfilePath: ./Dockerfile
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: YT_COOKIES_B64
+        sync: false # You will set this secret manually in the Render dashboard
+      - key: PHP_VERSION
+        value: 8.4 # Pin a modern PHP version
