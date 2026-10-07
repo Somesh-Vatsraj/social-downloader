@@ -1,31 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-app.py — YouTube Downloader (Render-ready)
+app.py — YouTube extractor + streamer (PHP-style Innertube, no yt-dlp)
+
 Endpoints:
-    GET  /                       -> HTML UI
-    GET  /health                 -> health check
-    GET  /info?url=...           -> JSON info + links
-    GET  /stream?url=...&q=720   -> live stream (proxy ya ffmpeg merge)
-    GET  /download?url=...&q=..  -> attachment download
-    GET  /audio?url=...&fmt=m4a  -> audio only (m4a / mp3)
+    GET /                        -> HTML UI
+    GET /health                  -> health check
+    GET /info?url=...            -> JSON (formats + links)
+    GET /stream360?url=...       -> 360p stream (itag 18, combined → direct proxy)
+    GET /stream720?url=...       -> 720p stream (itag 22 ya ffmpeg merge)
+    GET /audio?url=...&fmt=m4a   -> audio (itag 140 / 251)
 """
 
 import os
+import re
 import sys
+import json
 import shutil
 import subprocess
+from urllib.parse import unquote, urlencode, parse_qs
 
 from flask import (
     Flask, request, Response, jsonify,
     stream_with_context, render_template_string, url_for
 )
-
-try:
-    import yt_dlp
-except ImportError:
-    print("Install: pip install yt-dlp")
-    sys.exit(1)
 
 try:
     import requests
@@ -40,135 +38,199 @@ except ImportError:
 app = Flask(__name__)
 
 FFMPEG = shutil.which("ffmpeg") or "ffmpeg"
-DENO   = shutil.which("deno")   or "deno"
+CHUNK  = 65536
 
-# ---------- yt-dlp options: 2026 fixes applied ----------
-YDL_OPTS = {
-    "quiet": True,
-    "no_warnings": True,
-    "noplaylist": True,
-    "skip_download": True,
-    "nocheckcertificate": True,
-    "nocheckformats": False,
+# ANDROID client — PHP wala same config (May 2026, tested)
+ANDROID_UA      = "com.google.android.youtube/21.19.286 (Linux; U; Android 11) gzip"
+ANDROID_VER     = "21.19.286"
+ANDROID_CLIENT  = "ANDROID"
+ANDROID_ID      = "3"
 
-    # JS runtime (Deno) — signature solver ke liye zaroori
-    "js_runtime": "deno",
-
-    # Cloudflare / bot detection bypass
-    "impersonate": "chrome",
-
-    # Extractor tuning
-    "extractor_args": {
-        "youtube": {
-            # tv + mweb + android_vr = 2026 me sabse reliable combo
-            "player_client": ["tv", "mweb", "android_vr"],
-            # PO token (403 / bot-check bypass)
-            "po_token": ["web+https"],
-            # web page config skip (bot detector trigger nahi hoga)
-            "player_skip": ["webpage", "configs"],
-        }
-    },
-
-    # Timeouts
-    "socket_timeout": 30,
-    "retries": 3,
-    "fragment_retries": 3,
-}
-
-CHUNK = 65536
+INNERTUBE_URL = "https://www.youtube.com/youtubei/v1/player?prettyPrint=false"
 
 
 # ============================================================
-# Helpers
+# 1. VIDEO ID
 # ============================================================
-def extract_info(url: str) -> dict:
-    with yt_dlp.YoutubeDL(YDL_OPTS) as ydl:
-        return ydl.extract_info(url, download=False)
+YT_RE = re.compile(
+    r'(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/shorts/|youtube\.com/embed/)'
+    r'([A-Za-z0-9_-]{11})'
+)
+
+def get_video_id(url: str) -> str | None:
+    m = YT_RE.search(url or "")
+    return m.group(1) if m else None
 
 
-def quality_name(f: dict) -> str:
-    h = f.get("height")
-    if h:
-        if h >= 1080:
-            return f"{h}p Full HD"
-        if h >= 720:
-            return f"{h}p HD"
-        return f"{h}p"
-    abr = f.get("abr")
-    return f"{int(abr)}kbps" if abr else ""
-
-
-def yt_headers(ua: str) -> dict:
-    return {
-        "User-Agent": ua or "Mozilla/5.0",
-        "Referer": "https://www.youtube.com/",
+# ============================================================
+# 2. INNERTUBE CALL (ANDROID client)
+# ============================================================
+def call_innertube(video_id: str) -> dict:
+    payload = {
+        "context": {
+            "client": {
+                "hl": "en",
+                "gl": "US",
+                "clientName": ANDROID_CLIENT,
+                "clientVersion": ANDROID_VER,
+                "androidSdkVersion": 30,
+                "osName": "Android",
+                "osVersion": "11",
+                "userAgent": ANDROID_UA,
+            },
+            "request": {"useSsl": True},
+        },
+        "videoId": video_id,
+        "contentCheckOk": True,
+        "racyCheckOk": True,
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": ANDROID_UA,
+        "X-YouTube-Client-Name": ANDROID_ID,
+        "X-YouTube-Client-Version": ANDROID_VER,
         "Origin": "https://www.youtube.com",
+    }
+    r = requests.post(INNERTUBE_URL, data=json.dumps(payload),
+                      headers=headers, timeout=20)
+    if r.status_code != 200:
+        raise RuntimeError(f"YouTube returned HTTP {r.status_code}: {r.text[:300]}")
+    return r.json()
+
+
+# ============================================================
+# 3. HELPERS
+# ============================================================
+def decode_signature_cipher(cipher: str) -> str | None:
+    """PHP code jaisa — 'url=' nikalke double-url-decode karo."""
+    if not cipher:
+        return None
+    idx = cipher.find("url=")
+    if idx == -1:
+        return None
+    raw = cipher[idx + 4:]
+    # cipher string me '&s=' ya '&sp=' se pehle url hota hai
+    amp = raw.find("&")
+    if amp != -1:
+        raw = raw[:amp]
+    return unquote(unquote(raw))
+
+
+def normalize_format(f: dict) -> dict | None:
+    url = f.get("url")
+    if not url and f.get("signatureCipher"):
+        url = decode_signature_cipher(f["signatureCipher"])
+    if not url:
+        return None
+
+    mime = f.get("mimeType", "")
+    is_v = mime.startswith("video/")
+    is_a = mime.startswith("audio/")
+    container = mime.split("/")[1].split(";")[0] if "/" in mime else ""
+    codec = ""
+    cm = re.search(r'codecs="([^"]+)"', mime)
+    if cm:
+        codec = cm.group(1)
+
+    return {
+        "itag":           f.get("itag"),
+        "url":            url,
+        "mime":           mime,
+        "type":           "video" if is_v else ("audio" if is_a else "unknown"),
+        "has_video":      is_v,
+        "has_audio":      is_a or (is_v and f.get("audioQuality") is not None),
+        "container":      container,
+        "codec":          codec,
+        "quality":        f.get("qualityLabel") or f.get("audioQuality") or "",
+        "width":          f.get("width"),
+        "height":         f.get("height"),
+        "fps":            f.get("fps"),
+        "bitrate":        f.get("bitrate"),
+        "audio_bitrate":  f.get("averageBitrate") or f.get("bitrate"),
+        "content_length": f.get("contentLength"),
     }
 
 
-# ---------- Format pickers ----------
-def pick_combined(info, q, fmt="mp4"):
-    """Audio+video ek URL wala (itag 18, 22)."""
-    cands = [f for f in info.get("formats", [])
-             if f.get("vcodec") not in (None, "none")
-             and f.get("acodec") not in (None, "none")
-             and f.get("height") and f["height"] <= q
-             and f.get("ext") == fmt and f.get("url")]
-    if not cands:
-        return None
-    bh = max(f["height"] for f in cands)
-    return next(f for f in cands if f["height"] == bh)
+def extract_all_formats(data: dict) -> list[dict]:
+    sd = data.get("streamingData", {})
+    raw = (sd.get("formats") or []) + (sd.get("adaptiveFormats") or [])
+    out = []
+    for f in raw:
+        n = normalize_format(f)
+        if n:
+            out.append(n)
+    return out
 
 
-def pick_video(info, q, fmt="mp4"):
-    """Video-only adaptive stream."""
-    cands = [f for f in info.get("formats", [])
-             if f.get("vcodec") not in (None, "none")
-             and f.get("acodec") in (None, "none")
-             and f.get("height") and f["height"] <= q
-             and f.get("ext") == fmt and f.get("url")]
-    if not cands:
+def pick_video(formats, q, container="mp4"):
+    """Adaptive video-only pick."""
+    pool = [f for f in formats
+            if f["has_video"] and not f["has_audio"]
+            and f["height"] and f["height"] <= q
+            and f["container"] == container]
+    if not pool:
         return None
-    bh = max(f["height"] for f in cands)
-    cands = [f for f in cands if f["height"] == bh]
-    if fmt == "mp4":
-        cands.sort(key=lambda f: (
-            0 if str(f.get("vcodec", "")).startswith("avc1") else 1,
-            -(f.get("tbr") or 0)))
+    best = max(f["height"] for f in pool)
+    pool = [f for f in pool if f["height"] == best]
+    if container == "mp4":
+        pool.sort(key=lambda f: (
+            0 if f["codec"].startswith("avc1") else 1,
+            -(f["bitrate"] or 0)))
     else:
-        cands.sort(key=lambda f: -(f.get("tbr") or 0))
-    return cands[0]
+        pool.sort(key=lambda f: -(f["bitrate"] or 0))
+    return pool[0]
 
 
-def pick_audio(info, prefer="mp4"):
-    """Audio-only stream."""
-    target_ext = "m4a" if prefer == "mp4" else "webm"
-    cands = [f for f in info.get("formats", [])
-             if f.get("acodec") not in (None, "none")
-             and f.get("vcodec") in (None, "none")
-             and f.get("ext") == target_ext and f.get("url")]
-    if not cands:
+def pick_audio(formats, container="mp4"):
+    """Audio-only pick (m4a ya webm)."""
+    ext = "mp4" if container == "mp4" else "webm"
+    pool = [f for f in formats
+            if f["has_audio"] and not f["has_video"]
+            and f["container"] == ext]
+    if not pool:
         return None
-    cands.sort(key=lambda f: (
-        0 if str(f.get("acodec", "")).startswith("mp4a.40.2") else 1,
-        -(f.get("abr") or 0)))
-    return cands[0]
+    pool.sort(key=lambda f: (
+        0 if f["codec"].startswith("mp4a.40.2") else 1,
+        -(f["bitrate"] or 0)))
+    return pool[0]
 
 
-# ---------- Streaming helpers ----------
-def proxy_stream(media: dict, filename=None):
-    """Combined URL ko direct proxy (Range support)."""
-    headers = yt_headers(media.get("http_headers", {}).get("User-Agent"))
+def pick_combined(formats, q, container="mp4"):
+    """Audio+video ek URL (itag 18, 22)."""
+    pool = [f for f in formats
+            if f["has_video"] and f["has_audio"]
+            and f["height"] and f["height"] <= q
+            and f["container"] == container]
+    if not pool:
+        return None
+    best = max(f["height"] for f in pool)
+    pool = [f for f in pool if f["height"] == best]
+    return pool[0]
+
+
+# ============================================================
+# 4. STREAM HELPERS
+# ============================================================
+YT_HEADERS = {
+    "Origin": "https://www.youtube.com",
+    "Referer": "https://www.youtube.com/",
+    "User-Agent": ANDROID_UA,
+}
+
+
+def proxy_direct(media, ctype="video/mp4", filename=None):
+    """Combined (audio+video) URL ko direct proxy — 360p ke liye."""
     rng = request.headers.get("Range")
+    headers = dict(YT_HEADERS)
     if rng:
         headers["Range"] = rng
 
     try:
         r = requests.get(media["url"], headers=headers, stream=True, timeout=60)
     except Exception as e:
-        return jsonify({"success": False, "message": f"upstream error: {e}"}), 502
+        return jsonify({"success": False, "message": f"upstream: {e}"}), 502
 
-    def generate():
+    def gen():
         try:
             for chunk in r.iter_content(chunk_size=CHUNK):
                 if chunk:
@@ -176,30 +238,25 @@ def proxy_stream(media: dict, filename=None):
         finally:
             r.close()
 
-    resp_headers = {"Cache-Control": "no-store", "X-Accel-Buffering": "no"}
+    hdr = {"Cache-Control": "no-store", "X-Accel-Buffering": "no"}
     for h in ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges"):
         if h in r.headers:
-            resp_headers[h] = r.headers[h]
-    resp_headers.setdefault("Content-Type", "video/mp4")
+            hdr[h] = r.headers[h]
+    hdr.setdefault("Content-Type", ctype)
     if filename:
-        resp_headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        hdr["Content-Disposition"] = f'attachment; filename="{filename}"'
 
-    return Response(stream_with_context(generate()),
-                    status=r.status_code, headers=resp_headers,
+    return Response(stream_with_context(gen()),
+                    status=r.status_code, headers=hdr,
                     direct_passthrough=True)
 
 
-def ffmpeg_merge_pipe(video_media, audio_media, fmt="mp4", filename=None):
-    """Video-only + audio-only ko ffmpeg se live merge + pipe."""
-    ua_v = video_media.get("http_headers", {}).get("User-Agent") or "Mozilla/5.0"
-    ua_a = audio_media.get("http_headers", {}).get("User-Agent") or "Mozilla/5.0"
-
+def ffmpeg_pipe(video_media, audio_media, fmt="mp4", filename=None):
+    """Video + audio ko ffmpeg se live merge karke pipe (720p adaptive ke liye)."""
     hdr_v = (f"Origin: https://www.youtube.com\r\n"
              f"Referer: https://www.youtube.com/\r\n"
-             f"User-Agent: {ua_v}\r\n")
-    hdr_a = (f"Origin: https://www.youtube.com\r\n"
-             f"Referer: https://www.youtube.com/\r\n"
-             f"User-Agent: {ua_a}\r\n")
+             f"User-Agent: {ANDROID_UA}\r\n")
+    hdr_a = hdr_v
 
     if fmt == "webm":
         codec_opts = ["-c", "copy", "-f", "webm"]
@@ -217,9 +274,9 @@ def ffmpeg_merge_pipe(video_media, audio_media, fmt="mp4", filename=None):
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                 stderr=subprocess.DEVNULL, bufsize=0)
     except FileNotFoundError:
-        return jsonify({"success": False, "message": "ffmpeg missing"}), 500
+        return jsonify({"success": False, "message": "ffmpeg not installed"}), 500
 
-    def generate():
+    def gen():
         try:
             while True:
                 chunk = proc.stdout.read(CHUNK)
@@ -235,34 +292,33 @@ def ffmpeg_merge_pipe(video_media, audio_media, fmt="mp4", filename=None):
                 try: proc.kill()
                 except Exception: pass
 
-    headers = {
+    hdr = {
         "Content-Type": "video/webm" if fmt == "webm" else "video/mp4",
         "Cache-Control": "no-store",
         "X-Accel-Buffering": "no",
         "Accept-Ranges": "none",
     }
     if filename:
-        headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        hdr["Content-Disposition"] = f'attachment; filename="{filename}"'
 
-    return Response(stream_with_context(generate()),
-                    headers=headers, direct_passthrough=True)
+    return Response(stream_with_context(gen()), headers=hdr,
+                    direct_passthrough=True)
 
 
 def ffmpeg_audio_pipe(audio_media, fmt="m4a", filename=None):
-    """Audio-only pipe (m4a copy / mp3 re-encode)."""
-    ua = audio_media.get("http_headers", {}).get("User-Agent") or "Mozilla/5.0"
+    """Audio-only pipe (m4a copy ya mp3 re-encode)."""
     hdr = (f"Origin: https://www.youtube.com\r\n"
            f"Referer: https://www.youtube.com/\r\n"
-           f"User-Agent: {ua}\r\n")
+           f"User-Agent: {ANDROID_UA}\r\n")
 
-    src_codec = str(audio_media.get("acodec") or "")
-    src_ext   = audio_media.get("ext") or ""
+    src_codec = audio_media.get("codec", "")
+    src_ext   = audio_media.get("container", "")
 
     if fmt == "mp3":
         codec_opts = ["-vn", "-c:a", "libmp3lame", "-b:a", "192k", "-f", "mp3"]
         ctype = "audio/mpeg"
     else:
-        if src_ext == "m4a" and src_codec.startswith("mp4a"):
+        if src_ext == "mp4" and src_codec.startswith("mp4a"):
             codec_opts = ["-vn", "-c:a", "copy", "-f", "mp4"]
         else:
             codec_opts = ["-vn", "-c:a", "aac", "-b:a", "192k", "-f", "mp4"]
@@ -275,9 +331,9 @@ def ffmpeg_audio_pipe(audio_media, fmt="m4a", filename=None):
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                 stderr=subprocess.DEVNULL, bufsize=0)
     except FileNotFoundError:
-        return jsonify({"success": False, "message": "ffmpeg missing"}), 500
+        return jsonify({"success": False, "message": "ffmpeg not installed"}), 500
 
-    def generate():
+    def gen():
         try:
             while True:
                 chunk = proc.stdout.read(CHUNK)
@@ -293,25 +349,24 @@ def ffmpeg_audio_pipe(audio_media, fmt="m4a", filename=None):
                 try: proc.kill()
                 except Exception: pass
 
-    headers = {"Content-Type": ctype, "Cache-Control": "no-store",
+    hdr_out = {"Content-Type": ctype, "Cache-Control": "no-store",
                "X-Accel-Buffering": "no"}
     if filename:
-        headers["Content-Disposition"] = f'attachment; filename="{filename}"'
+        hdr_out["Content-Disposition"] = f'attachment; filename="{filename}"'
 
-    return Response(stream_with_context(generate()),
-                    headers=headers, direct_passthrough=True)
+    return Response(stream_with_context(gen()), headers=hdr_out,
+                    direct_passthrough=True)
 
 
 # ============================================================
-# Routes
+# 5. ROUTES
 # ============================================================
 @app.route("/health")
 def health():
     return jsonify({
         "ok": True,
         "ffmpeg": FFMPEG,
-        "deno": DENO,
-        "yt_dlp": getattr(yt_dlp.version, "__version__", "?"),
+        "client": f"{ANDROID_CLIENT} {ANDROID_VER}",
     })
 
 
@@ -325,168 +380,174 @@ def route_info():
     url = (request.args.get("url") or "").strip()
     if not url:
         return jsonify({"success": False, "message": "url required"}), 400
+
+    video_id = get_video_id(url)
+    if not video_id:
+        return jsonify({"success": False, "message": "Invalid YouTube URL"}), 400
+
     try:
-        info = extract_info(url)
+        data = call_innertube(video_id)
     except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 502
+        return jsonify({"success": False, "message": str(e) or repr(e)}), 502
+
+    status = data.get("playabilityStatus", {}).get("status", "")
+    reason = data.get("playabilityStatus", {}).get("reason", "Unknown")
+    if status != "OK":
+        return jsonify({"success": False,
+                        "message": f"NO Data: {reason}",
+                        "status": status}), 502
+
+    details = data.get("videoDetails", {})
+    formats = extract_all_formats(data)
 
     def self_url(endpoint, **kw):
         return url_for(endpoint, _external=True, **kw)
 
+    # dedupe by itag
     seen = set()
-    video_list, audio_list = [], []
-    for f in info.get("formats", []):
-        itag = str(f.get("format_id") or "")
-        has_v = f.get("vcodec") not in (None, "none")
-        has_a = f.get("acodec") not in (None, "none")
-        key = ("v" if has_v else "a") + itag
-        if key in seen: continue
+    media_out = []
+    for f in formats:
+        key = ("v" if f["has_video"] else "a") + str(f["itag"])
+        if key in seen:
+            continue
         seen.add(key)
-        if not (has_v or has_a): continue
+        row = dict(f)
+        row.pop("mime", None)
+        media_out.append(row)
 
-        row = {
-            "type": "video" if has_v else "audio",
-            "id": itag,
-            "url": f.get("url"),
-            "width": f.get("width"),
-            "height": f.get("height"),
-            "ext": f.get("ext"),
-            "container": f.get("ext"),
-            "vcodec": f.get("vcodec"),
-            "acodec": f.get("acodec"),
-            "has_video": has_v,
-            "has_audio": has_a,
-            "quality": quality_name(f),
-            "quality_label": f.get("format_note") or f.get("quality"),
-            "fps": f.get("fps"),
-            "tbr": f.get("tbr"),
-            "abr": f.get("abr"),
-            "vbr": f.get("vbr"),
-            "filesize": f.get("filesize") or f.get("filesize_approx"),
-            "type_combined": has_v and has_a,
-        }
-        (video_list if has_v else audio_list).append(row)
-
-    video_list.sort(key=lambda r: (r["height"] or 0, r["tbr"] or 0))
-    audio_list.sort(key=lambda r: -(r["abr"] or 0))
-
-    video_q = sorted({r["quality"] for r in video_list if r["quality"]})
-    audio_q = sorted({r["quality"] for r in audio_list if r["quality"]})
-
-    thumbnails = info.get("thumbnails") or []
-    thumb_url = info.get("thumbnail") or \
-                f"https://i.ytimg.com/vi/{info['id']}/hqdefault.jpg"
-
-    def stream_link(q, fmt="mp4"):
-        return self_url("route_stream", url=url, q=q, fmt=fmt)
-    def dl_link(q, fmt="mp4"):
-        return self_url("route_download", url=url, q=q, fmt=fmt)
-    def audio_link(fmt="m4a"):
-        return self_url("route_audio", url=url, fmt=fmt)
+    video_list = [r for r in media_out if r["has_video"]]
+    audio_list = [r for r in media_out if r["has_audio"] and not r["has_video"]]
 
     return jsonify({
-        "success": True,
-        "type": "video",
-        "id": info.get("id"),
-        "username": info.get("uploader"),
-        "profile_image_uri": thumb_url,
-        "caption": info.get("title"),
-        "description": info.get("description"),
-        "thumbnails": thumbnails,
-        "available_qualities": {"video": video_q, "audio": audio_q},
-        "has_1080p": any((r["height"] or 0) == 1080 for r in video_list),
+        "success":       True,
+        "videoId":       video_id,
+        "title":         details.get("title", ""),
+        "author":        details.get("author", ""),
+        "duration":      int(details.get("lengthSeconds", 0) or 0),
+        "thumbnails": [
+            {"url": t.get("url"),
+             "width": t.get("width"),
+             "height": t.get("height")}
+            for t in details.get("thumbnail", {}).get("thumbnails", [])
+            if t.get("url")
+        ],
         "stream_links": {
-            "360p_mp4":  stream_link(360),
-            "480p_mp4":  stream_link(480),
-            "720p_mp4":  stream_link(720),
-            "1080p_mp4": stream_link(1080),
-            "1080p_webm": stream_link(1080, "webm"),
+            "360p":  self_url("route_stream360", url=url),
+            "720p":  self_url("route_stream720", url=url),
+            "audio_m4a": self_url("route_audio", url=url, fmt="m4a"),
+            "audio_mp3": self_url("route_audio", url=url, fmt="mp3"),
         },
-        "download_links": {
-            "480p_mp4":  dl_link(480),
-            "720p_mp4":  dl_link(720),
-            "1080p_mp4": dl_link(1080),
-        },
-        "audio_links": {"m4a": audio_link("m4a"), "mp3": audio_link("mp3")},
-        "media": video_list + audio_list,
-        "duration": info.get("duration"),
-        "tags": info.get("tags") or [],
-        "source": "youtube",
+        "media":         media_out,
+        "video_formats": video_list,
+        "audio_formats": audio_list,
+        "total_formats": len(media_out),
     })
 
 
-@app.route("/stream")
-def route_stream():
+@app.route("/stream360")
+def route_stream360():
+    """360p — itag 18 (combined). Direct proxy, super fast."""
     url = (request.args.get("url") or "").strip()
-    q = int(request.args.get("q") or 1080)
-    fmt = request.args.get("fmt") or "mp4"
-    if fmt not in ("mp4", "webm"): fmt = "mp4"
-    if not url:
-        return jsonify({"success": False, "message": "url required"}), 400
+    video_id = get_video_id(url)
+    if not video_id:
+        return jsonify({"success": False, "message": "Invalid URL"}), 400
 
     try:
-        info = extract_info(url)
+        data = call_innertube(video_id)
     except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 502
+        return jsonify({"success": False, "message": str(e) or repr(e)}), 502
 
-    video_id = info.get("id") or "video"
+    if data.get("playabilityStatus", {}).get("status") != "OK":
+        return jsonify({"success": False, "message": "Video not playable"}), 502
 
-    # 1) combined (itag 18 / 22) -> proxy
-    comb = pick_combined(info, q, fmt)
+    formats = extract_all_formats(data)
+    pick = pick_combined(formats, 360, "mp4")
+    if not pick:
+        # fallback — 360p tak ka best
+        pick = pick_combined(formats, 480, "mp4")
+    if not pick:
+        return jsonify({"success": False, "message": "360p combined nahi mila"}), 404
+
+    return proxy_direct(pick, "video/mp4", f"{video_id}_360p.mp4")
+
+
+@app.route("/stream720")
+def route_stream720():
+    """720p — combined (itag 22) mile to direct; warna ffmpeg merge."""
+    url = (request.args.get("url") or "").strip()
+    fmt = (request.args.get("fmt") or "mp4").lower()
+    if fmt not in ("mp4", "webm"):
+        fmt = "mp4"
+    video_id = get_video_id(url)
+    if not video_id:
+        return jsonify({"success": False, "message": "Invalid URL"}), 400
+
+    try:
+        data = call_innertube(video_id)
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e) or repr(e)}), 502
+
+    if data.get("playabilityStatus", {}).get("status") != "OK":
+        return jsonify({"success": False, "message": "Video not playable"}), 502
+
+    formats = extract_all_formats(data)
+
+    # pehle combined try karo (itag 22 — 720p combined, sirf kuch videos me milta hai)
+    comb = pick_combined(formats, 720, fmt)
     if comb:
-        fname = f"{video_id}_{comb.get('height','')}p.{fmt}"
-        return proxy_stream(comb, filename=fname)
+        return proxy_direct(comb, "video/mp4", f"{video_id}_720p.{fmt}")
 
-    # 2) adaptive: ffmpeg merge
-    v = pick_video(info, q, fmt)
-    a = pick_audio(info, "mp4" if fmt == "mp4" else "webm")
+    # warna adaptive: video + audio alag → ffmpeg merge
+    v = pick_video(formats, 720, fmt)
+    a = pick_audio(formats, "mp4" if fmt == "mp4" else "webm")
     if not v or not a:
         return jsonify({"success": False,
-                        "message": f"q={q} fmt={fmt} ke liye stream nahi mila"}), 404
+                        "message": f"720p {fmt} ke liye video+audio nahi mila",
+                        "have_v": bool(v), "have_a": bool(a)}), 404
 
-    fname = f"{video_id}_{v.get('height','')}p.{fmt}"
-    return ffmpeg_merge_pipe(v, a, fmt=fmt, filename=fname)
-
-
-@app.route("/download")
-def route_download():
-    return route_stream()
+    return ffmpeg_pipe(v, a, fmt, f"{video_id}_720p.{fmt}")
 
 
 @app.route("/audio")
 def route_audio():
+    """Audio — m4a copy ya mp3 re-encode."""
     url = (request.args.get("url") or "").strip()
     fmt = (request.args.get("fmt") or "m4a").lower()
-    if fmt not in ("m4a", "mp3"): fmt = "m4a"
-    if not url:
-        return jsonify({"success": False, "message": "url required"}), 400
+    if fmt not in ("m4a", "mp3"):
+        fmt = "m4a"
+    video_id = get_video_id(url)
+    if not video_id:
+        return jsonify({"success": False, "message": "Invalid URL"}), 400
 
     try:
-        info = extract_info(url)
+        data = call_innertube(video_id)
     except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 502
+        return jsonify({"success": False, "message": str(e) or repr(e)}), 502
 
-    a = pick_audio(info, "mp4") or pick_audio(info, "webm")
+    if data.get("playabilityStatus", {}).get("status") != "OK":
+        return jsonify({"success": False, "message": "Video not playable"}), 502
+
+    formats = extract_all_formats(data)
+    a = pick_audio(formats, "mp4") or pick_audio(formats, "webm")
     if not a:
         return jsonify({"success": False, "message": "audio nahi mila"}), 404
 
-    video_id = info.get("id") or "audio"
     ext = "m4a" if fmt == "m4a" else "mp3"
-    return ffmpeg_audio_pipe(a, fmt=fmt, filename=f"{video_id}.{ext}")
+    return ffmpeg_audio_pipe(a, fmt, f"{video_id}.{ext}")
 
 
 # ============================================================
-# HTML UI
+# 6. HTML UI
 # ============================================================
 INDEX_HTML = """
 <!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>YT Downloader</title>
+<title>YT Downloader (Python)</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
-  body{font-family:system-ui,Arial;max-width:760px;margin:20px auto;padding:0 14px;color:#111}
+  body{font-family:system-ui,Arial;max-width:780px;margin:20px auto;padding:0 14px;color:#111}
   input,button{padding:10px 12px;font-size:15px;border-radius:8px;border:1px solid #ccc}
   input{width:100%;box-sizing:border-box}
   button{background:#0d6efd;color:#fff;border:0;cursor:pointer}
@@ -499,7 +560,7 @@ INDEX_HTML = """
 </style>
 </head>
 <body>
-<h1>YouTube Downloader (Render + yt-dlp + ffmpeg)</h1>
+<h1>YouTube Downloader (Python · Innertube)</h1>
 <div class="row"><input id="url" placeholder="https://youtu.be/XXXX"></div>
 <div class="row"><button onclick="go()">Load</button></div>
 <div id="out"></div>
@@ -510,25 +571,24 @@ async function go(){
   document.getElementById('out').innerHTML = 'Loading...';
   const r = await fetch('/info?url=' + encodeURIComponent(url));
   const j = await r.json();
-  if(!j.success){ document.getElementById('out').innerHTML = '<pre>' + JSON.stringify(j,null,2) + '</pre>'; return; }
-  const s = j.stream_links, a = j.audio_links;
-  let html = '<h3>' + (j.caption||'') + '</h3>';
-  html += '<div><b>By:</b> ' + (j.username||'') + ' &nbsp; <b>Duration:</b> ' + (j.duration||0) + 's</div>';
-  if(j.thumbnail) html += '<img src="'+j.thumbnail+'">';
-  html += '<div class="q"><b>Stream:</b><br>';
-  html += '<a href="'+s['360p_mp4']+'">360p</a>';
-  html += '<a href="'+s['480p_mp4']+'">480p</a>';
-  html += '<a href="'+s['720p_mp4']+'">720p</a>';
-  html += '<a href="'+s['1080p_mp4']+'">1080p</a>';
-  html += '<a href="'+s['1080p_webm']+'">1080p webm</a>';
+  if(!j.success){
+    document.getElementById('out').innerHTML = '<pre>'+JSON.stringify(j,null,2)+'</pre>';
+    return;
+  }
+  const s = j.stream_links;
+  let html = '<h3>'+(j.title||'')+'</h3>';
+  html += '<div><b>By:</b> '+(j.author||'')+' &nbsp; <b>Duration:</b> '+(j.duration||0)+'s</div>';
+  if(j.thumbnails && j.thumbnails.length) html += '<img src="'+j.thumbnails[j.thumbnails.length-1].url+'">';
+  html += '<div class="q"><b>Video:</b><br>';
+  html += '<a href="'+s['360p']+'">360p MP4</a>';
+  html += '<a href="'+s['720p']+'">720p MP4</a>';
   html += '</div>';
   html += '<div class="audio"><b>Audio:</b><br>';
-  html += '<a href="'+a['m4a']+'">M4A</a>';
-  html += '<a href="'+a['mp3']+'">MP3</a>';
+  html += '<a href="'+s['audio_m4a']+'">M4A</a>';
+  html += '<a href="'+s['audio_mp3']+'">MP3</a>';
   html += '</div>';
-  html += '<div style="margin-top:14px"><b>Download:</b> ';
-  for(const k in j.download_links){ html += '<a href="'+j.download_links[k]+'">'+k+'</a> '; }
-  html += '</div>';
+  html += '<h4>Formats ('+j.total_formats+')</h4>';
+  html += '<pre>'+JSON.stringify({video:j.video_formats.length,audio:j.audio_formats.length},null,2)+'</pre>';
   document.getElementById('out').innerHTML = html;
 }
 </script>
@@ -538,8 +598,8 @@ async function go(){
 
 
 # ============================================================
-# Local run
+# 7. MAIN
 # ============================================================
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
+    port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, threaded=True, debug=False)
