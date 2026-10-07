@@ -1,40 +1,30 @@
-# Use an official PHP runtime as a parent image
-FROM php:8.4-apache
+# Use an official Python runtime as a parent image
+FROM python:3.12-slim
 
 # Set the working directory
-WORKDIR /var/www/html
+WORKDIR /app
 
-# Install system dependencies
+# Install system dependencies: Node.js, npm, and ffmpeg
 RUN apt-get update && apt-get install -y \
-    git \
-    curl \
-    libpng-dev \
-    libonig-dev \
-    libxml2-dev \
-    zip \
-    unzip \
-    python3 \
-    python3-pip \
+    nodejs \
+    npm \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Install PHP extensions
-RUN docker-php-ext-install pdo_mysql mbstring exif pcntl bcmath gd
+# Install the bgutil PO Token provider globally using npm
+# This is the service that will run in the background to generate PO tokens.
+RUN npm install -g bgutil-ytdlp-pot-provider
 
-# Install yt-dlp
-RUN pip3 install --upgrade yt-dlp
-
-# Enable Apache mod_rewrite
-RUN a2enmod rewrite
+# Copy the requirements file and install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the application code
-COPY . /var/www/html
+COPY . .
 
-# Set permissions for Apache
-RUN chown -R www-data:www-data /var/www/html
+# Expose the port the app runs on
+EXPOSE 10000
 
-# Expose port 80 (Render will map its dynamic PORT to this)
-EXPOSE 80
-
-# Start Apache in the foreground
-CMD ["apache2-foreground"]
+# Command to run the application
+# We start the PO token provider server in the background, then start the Flask app.
+CMD node /usr/local/lib/node_modules/bgutil-ytdlp-pot-provider/server/build/main.js & python app.py
