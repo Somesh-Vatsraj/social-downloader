@@ -2,71 +2,43 @@
 
 header("Content-Type: application/json; charset=utf-8");
 
+function response($data)
+{
+    echo json_encode($data, JSON_UNESCAPED_UNICODE);
+    exit;
+}
 
-/*
-|--------------------------------------------------------------------------
-| Read request
-|--------------------------------------------------------------------------
-*/
-
-$raw =
-    file_get_contents("php://input");
-
-$data =
-    json_decode($raw, true);
+// Read request
+$raw = file_get_contents("php://input");
+$data = json_decode($raw, true);
 
 if (!is_array($data)) {
-
-    echo json_encode([
+    response([
         "success" => false,
         "error" => "Invalid request."
     ]);
-
-    exit;
 }
 
+$url = trim($data["url"] ?? "");
+$format = $data["format"] ?? "best";
 
-$url =
-    trim($data["url"] ?? "");
-
-$format =
-    $data["format"] ?? "best";
-
-
-/*
-|--------------------------------------------------------------------------
-| Validate URL
-|--------------------------------------------------------------------------
-*/
-
+// Validate URL
 if ($url === "") {
-
-    echo json_encode([
+    response([
         "success" => false,
-        "error" => "URL is required."
+        "error" => "Please enter a video URL."
     ]);
-
-    exit;
 }
 
 if (!filter_var($url, FILTER_VALIDATE_URL)) {
-
-    echo json_encode([
+    response([
         "success" => false,
         "error" => "Invalid URL."
     ]);
-
-    exit;
 }
 
-
-/*
-|--------------------------------------------------------------------------
-| Allowed formats
-|--------------------------------------------------------------------------
-*/
-
-$allowed = [
+// Allowed formats
+$allowedFormats = [
     "best",
     "720",
     "480",
@@ -74,191 +46,124 @@ $allowed = [
     "audio"
 ];
 
-if (!in_array($format, $allowed, true)) {
-
-    echo json_encode([
+if (!in_array($format, $allowedFormats, true)) {
+    response([
         "success" => false,
         "error" => "Invalid format."
     ]);
-
-    exit;
 }
 
+// Download directory
+$downloadDir = __DIR__ . "/downloads";
 
-/*
-|--------------------------------------------------------------------------
-| Download directory
-|--------------------------------------------------------------------------
-*/
-
-$dir =
-    __DIR__ . "/downloads";
-
-if (!is_dir($dir)) {
-
-    mkdir($dir, 0755, true);
+if (!is_dir($downloadDir)) {
+    if (!mkdir($downloadDir, 0755, true)) {
+        response([
+            "success" => false,
+            "error" => "Cannot create download directory."
+        ]);
+    }
 }
 
+// Unique ID
+$id = "video_" . bin2hex(random_bytes(8));
 
-/*
-|--------------------------------------------------------------------------
-| Unique filename
-|--------------------------------------------------------------------------
-*/
+// Output template
+$outputTemplate = $downloadDir . "/" . $id . ".%(ext)s";
 
-$id =
-    "video_" .
-    bin2hex(random_bytes(8));
-
-$output =
-    $dir . "/" .
-    $id .
-    ".%(ext)s";
-
-
-/*
-|--------------------------------------------------------------------------
-| Select format
-|--------------------------------------------------------------------------
-*/
-
+// Format selection
 switch ($format) {
 
     case "720":
-
         $formatArg =
             "bestvideo[height<=720]+bestaudio/" .
             "best[height<=720]";
-
         break;
 
     case "480":
-
         $formatArg =
             "bestvideo[height<=480]+bestaudio/" .
             "best[height<=480]";
-
         break;
 
     case "360":
-
         $formatArg =
             "bestvideo[height<=360]+bestaudio/" .
             "best[height<=360]";
-
         break;
 
     case "audio":
-
-        $formatArg =
-            "bestaudio";
-
+        $formatArg = "bestaudio";
         break;
 
     default:
-
         $formatArg =
             "bestvideo+bestaudio/best";
+        break;
 }
 
+// Deno path
+$denoPath = "/root/.deno/bin/deno";
 
-/*
-|--------------------------------------------------------------------------
-| Escape shell arguments
-|--------------------------------------------------------------------------
-*/
+// Escape shell arguments
+$safeUrl = escapeshellarg($url);
+$safeFormat = escapeshellarg($formatArg);
+$safeOutput = escapeshellarg($outputTemplate);
+$safeDeno = escapeshellarg("deno:" . $denoPath);
 
-$safeUrl =
-    escapeshellarg($url);
-
-$safeFormat =
-    escapeshellarg($formatArg);
-
-$safeOutput =
-    escapeshellarg($output);
-
-
-/*
-|--------------------------------------------------------------------------
-| Run yt-dlp
-|--------------------------------------------------------------------------
-*/
-
+// Build yt-dlp command
 $command =
     "yt-dlp " .
     "--no-playlist " .
-    "--js-runtimes deno " .
+    "--js-runtimes " . $safeDeno . " " .
     "--format " . $safeFormat . " " .
     "--output " . $safeOutput . " " .
     $safeUrl .
     " 2>&1";
 
-
+// Execute
 $outputLines = [];
-
 $returnCode = 0;
 
-exec(
-    $command,
-    $outputLines,
-    $returnCode
-);
+exec($command, $outputLines, $returnCode);
 
+// Find output files
+$files = glob($downloadDir . "/" . $id . ".*");
 
-/*
-|--------------------------------------------------------------------------
-| Find file
-|--------------------------------------------------------------------------
-*/
+// Failure
+if ($returnCode !== 0 || empty($files)) {
 
-$files =
-    glob($dir . "/" . $id . ".*");
-
-
-/*
-|--------------------------------------------------------------------------
-| Error
-|--------------------------------------------------------------------------
-*/
-
-if (
-    $returnCode !== 0 ||
-    empty($files)
-) {
-
-    $error =
-        implode("\n", $outputLines);
+    $error = implode("\n", $outputLines);
 
     if ($error === "") {
         $error = "yt-dlp failed.";
     }
 
-    echo json_encode([
+    response([
         "success" => false,
         "error" => $error
     ]);
-
-    exit;
 }
 
+// Select first file
+$file = $files[0];
 
-/*
-|--------------------------------------------------------------------------
-| Return file URL
-|--------------------------------------------------------------------------
-*/
+if (!file_exists($file)) {
+    response([
+        "success" => false,
+        "error" => "Downloaded file was not found."
+    ]);
+}
 
-$file =
-    basename($files[0]);
+// Filename
+$fileName = basename($file);
 
-$url =
-    "downloads/" .
-    rawurlencode($file);
+// Public URL
+$fileUrl = "downloads/" . rawurlencode($fileName);
 
-
-echo json_encode([
+// Success
+response([
     "success" => true,
-    "url" => $url
+    "url" => $fileUrl,
+    "filename" => $fileName
 ]);
-
-exit;
