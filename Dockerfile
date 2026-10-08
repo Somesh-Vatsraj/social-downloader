@@ -1,20 +1,19 @@
-FROM php:8.2-cli
+FROM php:8.2-cli-alpine
 
-RUN apt-get update && \
-    apt-get install -y \
+RUN apk add --no-cache \
     python3 \
-    python3-pip \
+    py3-pip \
     ffmpeg \
     curl \
     ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    bash
 
-# Deno - JavaScript runtime required by current yt-dlp YouTube extraction
+# Deno
 RUN curl -fsSL https://deno.land/install.sh | sh
 
 ENV PATH="/root/.deno/bin:${PATH}"
 
-# yt-dlp + EJS support
+# yt-dlp + EJS
 RUN pip3 install --break-system-packages -U "yt-dlp[default]"
 
 WORKDIR /app
