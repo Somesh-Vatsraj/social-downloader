@@ -8,12 +8,10 @@ RUN apk add --no-cache \
     ca-certificates \
     bash
 
-# Deno
 RUN curl -fsSL https://deno.land/install.sh | sh
 
 ENV PATH="/root/.deno/bin:${PATH}"
 
-# yt-dlp + EJS
 RUN pip3 install --break-system-packages -U "yt-dlp[default]"
 
 WORKDIR /app
