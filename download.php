@@ -5,14 +5,15 @@ header("Content-Type: application/json; charset=utf-8");
 
 /*
 |--------------------------------------------------------------------------
-| Read JSON
+| Read request
 |--------------------------------------------------------------------------
 */
 
-$input = file_get_contents("php://input");
+$raw =
+    file_get_contents("php://input");
 
-$data = json_decode($input, true);
-
+$data =
+    json_decode($raw, true);
 
 if (!is_array($data)) {
 
@@ -25,15 +26,11 @@ if (!is_array($data)) {
 }
 
 
-/*
-|--------------------------------------------------------------------------
-| Get values
-|--------------------------------------------------------------------------
-*/
+$url =
+    trim($data["url"] ?? "");
 
-$url = trim($data["url"] ?? "");
-
-$format = $data["format"] ?? "best";
+$format =
+    $data["format"] ?? "best";
 
 
 /*
@@ -46,12 +43,11 @@ if ($url === "") {
 
     echo json_encode([
         "success" => false,
-        "error" => "Video URL is required."
+        "error" => "URL is required."
     ]);
 
     exit;
 }
-
 
 if (!filter_var($url, FILTER_VALIDATE_URL)) {
 
@@ -66,11 +62,11 @@ if (!filter_var($url, FILTER_VALIDATE_URL)) {
 
 /*
 |--------------------------------------------------------------------------
-| Supported formats
+| Allowed formats
 |--------------------------------------------------------------------------
 */
 
-$allowedFormats = [
+$allowed = [
     "best",
     "720",
     "480",
@@ -78,8 +74,7 @@ $allowedFormats = [
     "audio"
 ];
 
-
-if (!in_array($format, $allowedFormats, true)) {
+if (!in_array($format, $allowed, true)) {
 
     echo json_encode([
         "success" => false,
@@ -96,46 +91,34 @@ if (!in_array($format, $allowedFormats, true)) {
 |--------------------------------------------------------------------------
 */
 
-$downloadDir =
+$dir =
     __DIR__ . "/downloads";
 
+if (!is_dir($dir)) {
 
-if (!is_dir($downloadDir)) {
-
-    if (!mkdir($downloadDir, 0755, true)) {
-
-        echo json_encode([
-            "success" => false,
-            "error" =>
-                "Could not create download directory."
-        ]);
-
-        exit;
-    }
+    mkdir($dir, 0755, true);
 }
 
 
 /*
 |--------------------------------------------------------------------------
-| Generate unique filename
+| Unique filename
 |--------------------------------------------------------------------------
 */
 
-$fileId =
+$id =
     "video_" .
     bin2hex(random_bytes(8));
 
-
-$outputTemplate =
-    $downloadDir .
-    "/" .
-    $fileId .
+$output =
+    $dir . "/" .
+    $id .
     ".%(ext)s";
 
 
 /*
 |--------------------------------------------------------------------------
-| Select yt-dlp format
+| Select format
 |--------------------------------------------------------------------------
 */
 
@@ -149,7 +132,6 @@ switch ($format) {
 
         break;
 
-
     case "480":
 
         $formatArg =
@@ -157,7 +139,6 @@ switch ($format) {
             "best[height<=480]";
 
         break;
-
 
     case "360":
 
@@ -167,7 +148,6 @@ switch ($format) {
 
         break;
 
-
     case "audio":
 
         $formatArg =
@@ -175,13 +155,10 @@ switch ($format) {
 
         break;
 
-
     default:
 
         $formatArg =
             "bestvideo+bestaudio/best";
-
-        break;
 }
 
 
@@ -198,50 +175,28 @@ $safeFormat =
     escapeshellarg($formatArg);
 
 $safeOutput =
-    escapeshellarg($outputTemplate);
+    escapeshellarg($output);
 
 
 /*
 |--------------------------------------------------------------------------
-| yt-dlp command
+| Run yt-dlp
 |--------------------------------------------------------------------------
-|
-| Deno is explicitly selected as the JS runtime.
-|
 */
 
 $command =
     "yt-dlp " .
-
     "--no-playlist " .
-
     "--js-runtimes deno " .
-
-    "--format " .
-    $safeFormat .
-    " " .
-
-    "--output " .
-    $safeOutput .
-    " " .
-
-    "--no-warnings " .
-
+    "--format " . $safeFormat . " " .
+    "--output " . $safeOutput . " " .
     $safeUrl .
-
     " 2>&1";
 
-
-/*
-|--------------------------------------------------------------------------
-| Execute
-|--------------------------------------------------------------------------
-*/
 
 $outputLines = [];
 
 $returnCode = 0;
-
 
 exec(
     $command,
@@ -252,22 +207,17 @@ exec(
 
 /*
 |--------------------------------------------------------------------------
-| Find downloaded file
+| Find file
 |--------------------------------------------------------------------------
 */
 
 $files =
-    glob(
-        $downloadDir .
-        "/" .
-        $fileId .
-        ".*"
-    );
+    glob($dir . "/" . $id . ".*");
 
 
 /*
 |--------------------------------------------------------------------------
-| Handle yt-dlp error
+| Error
 |--------------------------------------------------------------------------
 */
 
@@ -277,18 +227,11 @@ if (
 ) {
 
     $error =
-        implode(
-            "\n",
-            $outputLines
-        );
-
+        implode("\n", $outputLines);
 
     if ($error === "") {
-
-        $error =
-            "yt-dlp download failed.";
+        $error = "yt-dlp failed.";
     }
-
 
     echo json_encode([
         "success" => false,
@@ -301,35 +244,21 @@ if (
 
 /*
 |--------------------------------------------------------------------------
-| Get file
+| Return file URL
 |--------------------------------------------------------------------------
 */
 
-$filePath =
-    $files[0];
+$file =
+    basename($files[0]);
 
-
-$fileName =
-    basename($filePath);
-
-
-/*
-|--------------------------------------------------------------------------
-| Return download URL
-|--------------------------------------------------------------------------
-*/
-
-$fileUrl =
+$url =
     "downloads/" .
-    rawurlencode($fileName);
+    rawurlencode($file);
 
 
 echo json_encode([
-
     "success" => true,
-
-    "url" => $fileUrl
-
+    "url" => $url
 ]);
 
 exit;
