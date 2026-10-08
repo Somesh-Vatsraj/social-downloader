@@ -6,24 +6,22 @@ RUN apt-get update && \
     python3-pip \
     ffmpeg \
     curl \
-    unzip \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Deno
+# Deno - JavaScript runtime required by current yt-dlp YouTube extraction
 RUN curl -fsSL https://deno.land/install.sh | sh
 
 ENV PATH="/root/.deno/bin:${PATH}"
 
-# Install latest yt-dlp + EJS support
+# yt-dlp + EJS support
 RUN pip3 install --break-system-packages -U "yt-dlp[default]"
 
 WORKDIR /app
 
 COPY . /app
 
-RUN mkdir -p /app/downloads && \
-    chmod 755 /app/downloads
+RUN mkdir -p /app/downloads
 
 EXPOSE 10000
 
