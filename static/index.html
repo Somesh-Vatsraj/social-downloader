@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VidDrop – Universal Video Downloader</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header>
+        <h1>VidDrop</h1>
+        <p>Free Online Video Downloader for Instagram, Facebook, YouTube, TikTok, Pinterest, Twitter, Reddit, Snapchat, Threads, LinkedIn</p>
+    </header>
+
+    <main>
+        <section class="input-section">
+            <input type="url" id="urlInput" placeholder="Paste Instagram, Facebook, YouTube, etc. link..." />
+            <button id="downloadBtn">Download</button>
+        </section>
+
+        <section id="loading" class="hidden">
+            <div class="spinner"></div>
+            <p>Fetching media…</p>
+        </section>
+
+        <section id="errorBox" class="hidden">
+            <p id="errorMessage"></p>
+        </section>
+
+        <section id="resultBox" class="hidden">
+            <div id="profileInfo"></div>
+            <p id="caption"></p>
+            <div id="mediaList"></div>
+        </section>
+    </main>
+
+    <footer>
+        <p>Supported platforms: Instagram, Facebook, YouTube, TikTok, Pinterest, Twitter/X, Reddit, Snapchat, Threads, LinkedIn</p>
+        <p>Not supported: ShareChat, Moj</p>
+    </footer>
+
+    <script src="/static/script.js"></script>
+</body>
+</html>
