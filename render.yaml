@@ -1,9 +1,24 @@
 services:
   - type: web
-    name: vidrop
+    name: social-downloader
     env: docker
     plan: free
-    healthCheckPath: /
+    healthCheckPath: /healthz
     envVars:
       - key: PORT
         value: 8000
+      # Har platform ke cookies alag secret me daalein (Render Dashboard → Environment)
+      - key: INSTAGRAM_COOKIES
+        sync: false
+      - key: FACEBOOK_COOKIES
+        sync: false
+      - key: YOUTUBE_COOKIES
+        sync: false
+      - key: TIKTOK_COOKIES
+        sync: false
+      - key: TWITTER_COOKIES
+        sync: false
+      - key: REDDIT_COOKIES
+        sync: false
+      - key: LINKEDIN_COOKIES
+        sync: false
