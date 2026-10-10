@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: voice-clone-app
+    runtime: docker
+    plan: standard          # ⚠️ Free tier पर XTTS v2 नहीं चलेगा
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: 8000
