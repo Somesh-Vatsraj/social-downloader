@@ -1,0 +1,8 @@
+coqui-tts
+fastapi
+uvicorn[standard]
+python-multipart
+jinja2
+torch==2.2.2
+torchaudio==2.2.2
+numpy<2.0
