@@ -1,9 +1,11 @@
 services:
   - type: web
-    name: social-downloader
+    name: voice-clone-app
     runtime: docker
-    plan: standard          # ⚠️ Free tier पर XTTS v2 नहीं चलेगा
+    plan: standard   # ⚠️ Free tier पर XTTS v2 की 2.5GB RAM नहीं मिलेगी
     autoDeploy: true
     envVars:
       - key: PORT
         value: 8000
+      - key: PYTHONUNBUFFERED
+        value: "1"
