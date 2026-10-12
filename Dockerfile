@@ -1,17 +1,24 @@
+
 FROM python:3.11-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg curl ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PORT=10000
 
 WORKDIR /app
 
 COPY requirements.txt .
 
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir --upgrade yt-dlp
+RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
+COPY app.py .
 
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+RUN useradd --create-home appuser \
+    && mkdir -p /tmp/instasave \
+    && chown -R appuser:appuser /app /tmp/instasave
+
+USER appuser
+
+EXPOSE 10000
+
+CMD ["sh", "-c", "gunicorn app:app --bind 0.0.0.0:${PORT} --workers 1 --threads 4 --timeout 120"]
