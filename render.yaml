@@ -1,24 +1,11 @@
+
 services:
   - type: web
-    name: social-downloader
-    env: docker
+    name: instasave-downloader
+    runtime: python
     plan: free
-    healthCheckPath: /healthz
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app --workers 1 --threads 4 --timeout 120
     envVars:
-      - key: PORT
-        value: 8000
-      # Har platform ke cookies alag secret me daalein (Render Dashboard → Environment)
-      - key: INSTAGRAM_COOKIES
-        sync: false
-      - key: FACEBOOK_COOKIES
-        sync: false
-      - key: YOUTUBE_COOKIES
-        sync: false
-      - key: TIKTOK_COOKIES
-        sync: false
-      - key: TWITTER_COOKIES
-        sync: false
-      - key: REDDIT_COOKIES
-        sync: false
-      - key: LINKEDIN_COOKIES
-        sync: false
+      - key: PYTHON_VERSION
+        value: 3.11.11
